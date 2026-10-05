@@ -1,0 +1,7 @@
+batch,heads,seq_len,head_dim,causal,description
+4,8,512,64,0,short_dense
+4,8,512,64,1,short_causal
+2,8,2048,64,0,long_dense
+2,8,2048,64,1,long_causal
+1,8,2048,128,1,head_dim_128
+1,8,4096,64,1,long_context

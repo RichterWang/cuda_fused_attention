@@ -1,0 +1,5 @@
+# Start with one metric group per NCU run when collection overhead is material.
+dram__bytes_read.sum
+dram__bytes_write.sum
+sm__warps_active.avg.pct_of_peak_sustained_active
+smsp__sass_average_data_bytes_per_sector_mem_global_op_ld.pct

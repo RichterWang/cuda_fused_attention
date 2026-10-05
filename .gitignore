@@ -1,0 +1,19 @@
+# CMake and compiler outputs
+/build/
+/compile_commands.json
+*.o
+*.a
+
+# Nsight Compute reports and generated measurements
+/results/raw/*
+!/results/raw/.gitkeep
+/results/figures/*
+!/results/figures/.gitkeep
+/results/ncu/*
+!/results/ncu/.gitkeep
+*.ncu-rep
+
+# Editor and operating-system files
+.DS_Store
+.vscode/
+.idea/
