@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-set(CMAKE_CUDA_ARCHITECTURES 86 CACHE STRING "CUDA architectures to build for")
+set(CMAKE_CUDA_ARCHITECTURES 86)
 
 find_package(CUDAToolkit REQUIRED)
 enable_testing()
@@ -26,11 +26,12 @@ endfunction()
 
 add_attention_kernel(flash_attention_v0 kernels/v0_unfused.cu)
 add_attention_kernel(flash_attention_v1 kernels/v1_fused_row.cu)
-add_attention_kernel(flash_attention_v2 kernels/v2/v2_tiled_pipelined.cu)
+add_attention_kernel(flash_attention_v2 kernels/v2/v2a_tiled_pipelined.cu)
+add_attention_kernel(flash_attention_v2b kernels/v2/v2b_tiled_pipelined.cu)
 
 add_executable(bench_flash_attention benchmarks/bench_flash_attention.cu)
 target_link_libraries(bench_flash_attention PRIVATE
-  flash_attention flash_attention_v0 flash_attention_v1 flash_attention_v2
+  flash_attention flash_attention_v0 flash_attention_v1 flash_attention_v2 flash_attention_v2b
 )
 
 add_test(NAME flash_attention_bench COMMAND bench_flash_attention)

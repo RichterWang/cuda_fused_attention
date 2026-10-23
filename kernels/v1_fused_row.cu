@@ -14,7 +14,7 @@ constexpr int kBlockSize = 128; // block size(threads)
 
 // get sharedmem size data
 template <int HeadDim>
-constexpr int tile_rows_for()
+constexpr __host__  __device__ int tile_rows_for()
 {
     return 4096 / HeadDim;
 }

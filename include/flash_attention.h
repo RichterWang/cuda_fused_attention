@@ -78,4 +78,10 @@ FusedTilingInfo query_fused_tiling(int head_dim);
 // Counts whole tiles, matching the kernel's loop trip count exactly.
 double fused_tiling_hbm_bytes(const AttentionShape& shape, bool causal);
 
+// V2b is kept as an independently buildable and benchmarkable experiment copy
+// while its memory-access changes are developed separately from V2a.
+void launch_attention_fusedtiling_v2b(const __nv_bfloat16* q, const __nv_bfloat16* k, const __nv_bfloat16* v, __nv_bfloat16* o, const AttentionShape& shape, bool causal, cudaStream_t stream = nullptr);
+FusedTilingInfo query_fused_tiling_v2b(int head_dim);
+double fused_tiling_v2b_hbm_bytes(const AttentionShape& shape, bool causal);
+
 }  // namespace cuda_op_lab::flash_attention

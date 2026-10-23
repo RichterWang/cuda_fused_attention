@@ -25,6 +25,9 @@ using cuda_op_lab::flash_attention::FusedTilingInfo;
 using cuda_op_lab::flash_attention::launch_attention_fusedtiling;
 using cuda_op_lab::flash_attention::query_fused_tiling;
 using cuda_op_lab::flash_attention::fused_tiling_hbm_bytes;
+using cuda_op_lab::flash_attention::launch_attention_fusedtiling_v2b;
+using cuda_op_lab::flash_attention::query_fused_tiling_v2b;
+using cuda_op_lab::flash_attention::fused_tiling_v2b_hbm_bytes;
 
 constexpr int kWarmupIters = 3;
 constexpr int kTimedIters = 10;
@@ -238,6 +241,12 @@ void run_fused_tiling(void* context)
     launch_attention_fusedtiling(buffers.q, buffers.k, buffers.v, buffers.o, buffers.shape, buffers.causal, nullptr);    
 }
 
+void run_fused_tiling_v2b(void* context)
+{
+    Buffers& buffers = *static_cast<Buffers*>(context);
+    launch_attention_fusedtiling_v2b(buffers.q, buffers.k, buffers.v, buffers.o, buffers.shape, buffers.causal, nullptr);
+}
+
 }  // namespace
 
 int main()
@@ -289,6 +298,22 @@ int main()
         std::printf("  if blocks/SM is lower, registers or the warp limit bind first.\n");
     }
     std::printf("\n");    
+
+    std::printf("v2b configuration (independent experiment baseline):\n");
+    std::printf("  %10s %10s %8s %8s %14s %8s %8s %12s %12s\n", "head_dim", "block", "tile_kv", "q_rows", "shared/block", "regs", "local", "blocks/SM", "smem-capped");
+    for (int head_dim : {64, 128}) {
+        const FusedTilingInfo info = query_fused_tiling_v2b(head_dim);
+        if (!info.supported) {
+            std::printf("  %10d   unsupported\n", head_dim);
+            continue;
+        }
+        std::printf("  %10d %10d %8d %8d %12dB %8d %7dB %12d %12d\n",
+                    head_dim, info.block_size, info.tile_kv, info.rows_per_block,
+                    info.shared_bytes_per_block, info.registers_per_thread,
+                    info.local_bytes_per_thread, info.max_blocks_per_sm,
+                    info.shared_limited_blocks_per_sm);
+    }
+    std::printf("\n");
 
     bool all_passed = true;
 
@@ -344,7 +369,8 @@ int main()
                 const Entry entries[] = {
                     {"v0_unfused", run_unfused, [](int){return true; }}, 
                     {"v1_fused_row", run_fused_row, fused_row_supported},
-                    {"v2_fused_tiled", run_fused_tiling, [](int head_dim){return head_dim == 64 || head_dim == 128 ? true : false;}}
+                    {"v2a_fused_tiled", run_fused_tiling, [](int head_dim){return head_dim == 64 || head_dim == 128;}},
+                    {"v2b_fused_tiled", run_fused_tiling_v2b, [](int head_dim){return head_dim == 64 || head_dim == 128;}}
                 };
 
                 for (const Entry& entry : entries)
@@ -445,8 +471,14 @@ int main()
             // re-read is 1/8 of v1's -- it cannot reuse v1's per-row formula.
             const double gb = fused_tiling_hbm_bytes(shape, item.causal) / 1.0e9;
 
-            std::printf("  %-16s %10.3f %10.2f %10.3f", "v2_fused_tiled", ms, flops / (ms / 1.0e3) / 1.0e12, gb);
+            std::printf("  %-16s %10.3f %10.2f %10.3f", "v2a_fused_tiled", ms, flops / (ms / 1.0e3) / 1.0e12, gb);
             if (run_v0) std::printf(" %9.2fx\n", baseline_ms / ms);
+            else std::printf(" %10s\n", "-");
+
+            const float ms_v2b = time_iterations(run_fused_tiling_v2b, &buffers);
+            const double gb_v2b = fused_tiling_v2b_hbm_bytes(shape, item.causal) / 1.0e9;
+            std::printf("  %-16s %10.3f %10.2f %10.3f", "v2b_fused_tiled", ms_v2b, flops / (ms_v2b / 1.0e3) / 1.0e12, gb_v2b);
+            if (run_v0) std::printf(" %9.2fx\n", baseline_ms / ms_v2b);
             else std::printf(" %10s\n", "-");
         }
 

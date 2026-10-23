@@ -17,3 +17,6 @@
 .DS_Store
 .vscode/
 .idea/
+
+# User-specific files
+/personal

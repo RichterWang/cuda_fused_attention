@@ -16,7 +16,8 @@ asynchronous staging.
 |---|---|---|
 | `v0_unfused` | Separate `QK^T`, stable softmax, and `PV` kernels; materializes scores | GPU correctness and performance baseline |
 | `v1_fused_row` | One query row per block with online softmax | Isolates fusion without cross-row K/V reuse |
-| `v2_tiled_pipelined` | Multiple query rows per block, shared-memory K/V tiles, and pipelined staging | Candidate optimized implementation |
+| `v2a_tiled_pipelined` | Multiple query rows per block, shared-memory K/V tiles, and pipelined staging | Existing V2 implementation |
+| `v2b_tiled_pipelined` | Independent copy of the current tiled kernel, built and run separately | Baseline for the next V2 experiment iteration |
 
 Inputs and outputs are BF16; intermediate accumulation is FP32. The supported
 attention layouts are `[batch, heads, sequence_length, head_dimension]`, with
@@ -41,6 +42,7 @@ ctest --test-dir build --output-on-failure
 
 The benchmark contains a CPU FP64 reference for correctness and reports
 end-to-end latency, TFLOP/s, algorithmic traffic, and resource information.
+It runs both V2a and V2b through the same correctness and performance cases.
 
 ## Focused Nsight Compute profiling
 
