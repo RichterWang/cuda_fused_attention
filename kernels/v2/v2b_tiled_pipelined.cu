@@ -33,6 +33,7 @@ __device__ __forceinline__ void cp_async_16_zfill(void *sharedptr, const void *b
         "cp.async.cg.shared.global [%0], [%1], 16, %2; \n"
         :
         : "r"(shared_addr), "l"(baseptr), "r"(src_size)
+        : "memory"
     );
 #else
     *reinterpret_cast<uint4*>(sharedptr) = valid ? *reinterpret_cast<const uint4*>(baseptr) : make_uint4(0, 0, 0, 0);
@@ -40,12 +41,12 @@ __device__ __forceinline__ void cp_async_16_zfill(void *sharedptr, const void *b
 }
 
 __device__ __forceinline__ void cp_async_commit() {
-    asm volatile("cp.async.commit_group;\n" ::);
+    asm volatile("cp.async.commit_group;\n" ::: "memory");
 }
 
 template <int N>
 __device__ __forceinline__ void cp_async_wait() {
-    asm volatile("cp.async.wait_group %0;\n" :: "n"(N));
+    asm volatile("cp.async.wait_group %0;\n" :: "n"(N) : "memory");
 }
 
 // warp_shuffle reduce function
@@ -287,7 +288,7 @@ void __global__ attention_kernel_fusedtiling_v2b(const __nv_bfloat16* __restrict
                 const float p = score[tiled_row * tileKV + kr];
 
                 float temp_v[element_per_lane];
-                const int swz_offset = swz<head_dim>(kr, d_base / 8);
+                const int swz_offset = swz<head_dim>(kr, d_base >> 3) + (d_base & 0x7); // swizzle offset for V
 
                 load_bf16_vec(temp_v, &sharedV[kr * head_dim + swz_offset]);
 
@@ -406,7 +407,7 @@ void __global__ attention_kernel_fusedtiling_v2b(const __nv_bfloat16* __restrict
             const float p = score[tiled_row * tileKV + kr];
 
             float temp_v[element_per_lane];
-            const int swz_offset = swz<head_dim>(kr, d_base / 8);
+            const int swz_offset = swz<head_dim>(kr, d_base >> 3) + (d_base & 0x7); // swizzle offset for V
 
             load_bf16_vec(temp_v, &sharedV[kr * head_dim + swz_offset]);
 

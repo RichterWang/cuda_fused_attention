@@ -40,3 +40,11 @@ add_test(NAME flash_attention_bench COMMAND bench_flash_attention)
 # filtering and launch counting are stable across benchmark changes.
 add_executable(profile_attention_v2 benchmarks/profile_attention_v2.cu)
 target_link_libraries(profile_attention_v2 PRIVATE flash_attention flash_attention_v2)
+
+add_attention_kernel(ablation_b01 kernels/ablation/b_v_access/b01.cu)
+add_attention_kernel(ablation_b10 kernels/ablation/b_v_access/b10.cu)
+add_attention_kernel(ablation_c1_sync kernels/ablation/c_v2a_pipeline/c1_sync.cu)
+add_attention_kernel(ablation_c1_async kernels/ablation/c_v2a_pipeline/c1_async.cu)
+add_attention_kernel(ablation_v2b_single kernels/ablation/d_v2b_pipeline/v2b_single.cu)
+add_executable(ablation_experiments kernels/ablation/experiments.cu)
+target_link_libraries(ablation_experiments PRIVATE flash_attention_v0 flash_attention_v1 flash_attention_v2 flash_attention_v2b ablation_b01 ablation_b10 ablation_c1_sync ablation_c1_async ablation_v2b_single)

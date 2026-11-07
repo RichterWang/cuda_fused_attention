@@ -20,3 +20,6 @@
 
 # User-specific files
 /personal
+
+# Generated ablation measurements and profiler reports
+/kernels/ablation/result/
