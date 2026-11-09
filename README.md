@@ -44,6 +44,22 @@ The benchmark contains a CPU FP64 reference for correctness and reports
 end-to-end latency, TFLOP/s, algorithmic traffic, and resource information.
 It runs both V2a and V2b through the same correctness and performance cases.
 
+## V0 stage timing
+
+An independent V0 profiling copy measures QK, softmax and PV without changing
+original V0. One entry point provides timing, correctness checks and NCU mode:
+
+```bash
+cmake --build build --target profile_attention_v0 -j
+./build/profile_attention_v0 --check
+./build/profile_attention_v0 2 8 2048 64 0 30 5
+```
+
+Arguments are `B H N D causal [samples [warmup]]`; no arguments runs two
+representative dense shapes. Output includes stage median/IQR and a separate
+original-V0 end-to-end measurement. See [V0 profiling](docs/v0_profiling.md)
+for measurement details and NCU commands.
+
 ## Focused Nsight Compute profiling
 
 The focused profile binary launches only V2. This avoids depending on the

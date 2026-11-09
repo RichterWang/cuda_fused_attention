@@ -48,3 +48,9 @@ add_attention_kernel(ablation_c1_async kernels/ablation/c_v2a_pipeline/c1_async.
 add_attention_kernel(ablation_v2b_single kernels/ablation/d_v2b_pipeline/v2b_single.cu)
 add_executable(ablation_experiments kernels/ablation/experiments.cu)
 target_link_libraries(ablation_experiments PRIVATE flash_attention_v0 flash_attention_v1 flash_attention_v2 flash_attention_v2b ablation_b01 ablation_b10 ablation_c1_sync ablation_c1_async ablation_v2b_single)
+
+# Independent V0 copy with stage-boundary events; original V0 stays frozen.
+add_attention_kernel(flash_attention_v0_profile kernels/v0_unfused_profile.cu)
+add_executable(profile_attention_v0 benchmarks/profile_attention_v0.cu)
+target_link_libraries(profile_attention_v0 PRIVATE flash_attention_v0_profile flash_attention_v0)
+add_test(NAME v0_profile_correctness COMMAND profile_attention_v0 --check)
