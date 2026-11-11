@@ -84,4 +84,15 @@ void launch_attention_fusedtiling_v2b(const __nv_bfloat16* q, const __nv_bfloat1
 FusedTilingInfo query_fused_tiling_v2b(int head_dim);
 double fused_tiling_v2b_hbm_bytes(const AttentionShape& shape, bool causal);
 
+// v3 is the Tensor Core (mma.m16n8k16, bf16) fused kernel. It reuses v2's
+// resource struct: 128 threads per block, tile_kv 64, and 64 query rows per
+// block, so rows_per_block is the only field whose meaning shifts.
+bool tensorcore_v3_supported(int head_dim);
+
+void launch_attention_tensorcore_v3(const __nv_bfloat16* q, const __nv_bfloat16* k, const __nv_bfloat16* v, __nv_bfloat16* o, const AttentionShape& shape, bool causal, cudaStream_t stream = nullptr);
+
+FusedTilingInfo query_tensorcore_v3(int head_dim);
+
+double tensorcore_v3_hbm_bytes(const AttentionShape& shape, bool causal);
+
 }  // namespace cuda_op_lab::flash_attention

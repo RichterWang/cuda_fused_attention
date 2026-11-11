@@ -28,6 +28,7 @@ add_attention_kernel(flash_attention_v0 kernels/v0_unfused.cu)
 add_attention_kernel(flash_attention_v1 kernels/v1_fused_row.cu)
 add_attention_kernel(flash_attention_v2 kernels/v2/v2a_tiled_pipelined.cu)
 add_attention_kernel(flash_attention_v2b kernels/v2/v2b_tiled_pipelined.cu)
+add_attention_kernel(flash_attention_v3 kernels/v3/v3_tensorcore.cu)
 
 add_executable(bench_flash_attention benchmarks/bench_flash_attention.cu)
 target_link_libraries(bench_flash_attention PRIVATE
@@ -35,6 +36,14 @@ target_link_libraries(bench_flash_attention PRIVATE
 )
 
 add_test(NAME flash_attention_bench COMMAND bench_flash_attention)
+
+# Slimmed benchmark that only pulls in the API surface it actually calls
+# (v0 unfused, v1 fused_row, v2a tiled, v2b tiled, v3 tensor core) plus the
+# header-only interface target. No ablation kernels or profiling copies are linked.
+add_executable(bench_flash_attention_lite benchmarks/bench_flash_attention_lite.cu)
+target_link_libraries(bench_flash_attention_lite PRIVATE
+  flash_attention flash_attention_v0 flash_attention_v1 flash_attention_v2 flash_attention_v2b flash_attention_v3
+)
 
 # A focused NCU entry point. It launches only the V2 kernel so kernel-name
 # filtering and launch counting are stable across benchmark changes.

@@ -28,6 +28,9 @@ using cuda_op_lab::flash_attention::fused_tiling_hbm_bytes;
 using cuda_op_lab::flash_attention::launch_attention_fusedtiling_v2b;
 using cuda_op_lab::flash_attention::query_fused_tiling_v2b;
 using cuda_op_lab::flash_attention::fused_tiling_v2b_hbm_bytes;
+using cuda_op_lab::flash_attention::launch_attention_tensorcore_v3;
+using cuda_op_lab::flash_attention::tensorcore_v3_supported;
+using cuda_op_lab::flash_attention::tensorcore_v3_hbm_bytes;
 
 constexpr int kWarmupIters = 3;
 constexpr int kTimedIters = 10;
@@ -35,10 +38,19 @@ constexpr int kTimedIters = 10;
 // persice check config(example shape)
 constexpr int kAccuracyBatch = 1;
 constexpr int kAccuracyHeads = 2;
-constexpr int kAccuracySeq = 256;
+
+// 64 is one query tile for v3 and one K/V tile for every fused kernel, so these
+// lengths cover a sequence shorter than a tile, an exact tile, and the tail
+// cases (a partial query tile and a partial K/V tile) that a fixed N misses.
+const std::vector<int> kAccuracySeqs = {1, 63, 64, 65, 129, 256};
 
 // ULP torlance
 constexpr float kUlpTolerance = 2.0f;
+
+// v3 rounds P to bf16 before the PV mma, so its row-scale error is larger by
+// construction. This is a separate documented number, not a relaxation of the
+// shared tolerance; confirm it once v3 actually produces output.
+constexpr float kV3UlpTolerance = 8.0f;
 
 // the upper bound of the memory size(on 3070Ti)
 constexpr size_t kMaxWorkspaceBytes = 1ull << 30;  // 1 GB
@@ -247,6 +259,31 @@ void run_fused_tiling_v2b(void* context)
     launch_attention_fusedtiling_v2b(buffers.q, buffers.k, buffers.v, buffers.o, buffers.shape, buffers.causal, nullptr);
 }
 
+void run_tensorcore_v3(void* context)
+{
+    Buffers& buffers = *static_cast<Buffers*>(context);
+    launch_attention_tensorcore_v3(buffers.q, buffers.k, buffers.v, buffers.o, buffers.shape, buffers.causal, nullptr);
+}
+
+// One registry for the accuracy section, so a new kernel is added in one place.
+// Each entry carries its own tolerance: v3's bf16 P is a deliberate trade-off,
+// not a reason to loosen the tolerance every other kernel is held to.
+struct Entry
+{
+    const char* name;
+    void (*func)(void*);
+    bool (*supported)(int);
+    float ulp_tolerance;
+};
+
+const Entry kEntries[] = {
+    {"v0_unfused", run_unfused, [](int){ return true; }, kUlpTolerance},
+    {"v1_fused_row", run_fused_row, fused_row_supported, kUlpTolerance},
+    {"v2a_fused_tiled", run_fused_tiling, [](int head_dim){ return head_dim == 64 || head_dim == 128; }, kUlpTolerance},
+    {"v2b_fused_tiled", run_fused_tiling_v2b, [](int head_dim){ return head_dim == 64 || head_dim == 128; }, kUlpTolerance},
+    {"v3_tensorcore", run_tensorcore_v3, tensorcore_v3_supported, kV3UlpTolerance}
+};
+
 }  // namespace
 
 int main()
@@ -260,7 +297,7 @@ int main()
     std::printf("device: %s  (sm_%d%d)\n", props.name, props.major, props.minor);
     std::printf("dtype: bf16 storage, fp32 accumulate\n");
     std::printf("HBM GB is the algorithmic traffic, not a profiler reading: v0 includes the fp32 score matrix, fused kernels do not.\n");
-    std::printf("accuracy: ulp is the pass/fail number, measured at the row scale (not per element -- attention output cancels), tolerance %.1f\n\n", kUlpTolerance);
+    std::printf("accuracy: ulp is the pass/fail number, measured at the row scale (not per element -- attention output cancels), tolerance %.1f except v3 %.1f (it rounds P to bf16)\n\n", kUlpTolerance, kV3UlpTolerance);
 
     // v1 configuration printing
     std::printf("v1 configuration (local_bytes must be 0, or the output accumulator spilled):\n");
@@ -317,86 +354,81 @@ int main()
 
     bool all_passed = true;
 
-    // Accuracy, on one small shape, both casual mask settings.
+    // Accuracy on small shapes, both causal mask settings. kAccuracySeqs buys
+    // the boundary coverage that a single N=256 case cannot: v3's query tile is
+    // 64 rows and every fused kernel walks K/V in 64-row tiles, so N < 64, an
+    // exact tile, and the two tail cases all take different index paths.
     {
-        std::printf("accuracy check (batch=%d heads=%d seq=%d):\n", kAccuracyBatch, kAccuracyHeads, kAccuracySeq);
-        std::printf("  %-16s %8s %8s %14s %10s\n", "kernel", "head_dim", "causal", "vs_double", "ulp");
+        std::printf("accuracy check (batch=%d heads=%d, seq in {", kAccuracyBatch, kAccuracyHeads);
+        for (size_t index = 0; index < kAccuracySeqs.size(); ++index)
+            std::printf("%s%d", index == 0 ? "" : ",", kAccuracySeqs[index]);
+        std::printf("}):\n");
+        std::printf("  %-16s %8s %8s %6s %14s %10s\n", "kernel", "head_dim", "causal", "seq", "vs_double", "ulp");
 
         for (int head_dim : {64, 128})
         {
             for (bool causal : {false, true})
             {
-                const AttentionShape shape{kAccuracyBatch, kAccuracyHeads, kAccuracySeq, head_dim};
-                const size_t count = static_cast<size_t>(shape.batch) * shape.heads * shape.seq_len * shape.head_dim;
-                const size_t bytes = count * sizeof(__nv_bfloat16);
-
-                std::vector<__nv_bfloat16> host_q(count);
-                std::vector<__nv_bfloat16> host_k(count);
-                std::vector<__nv_bfloat16> host_v(count);
-                std::vector<__nv_bfloat16> host_o(count);
-                std::vector<double> reference(count);
-
-                fill_normal(host_q, 11u);
-                fill_normal(host_k, 22u);
-                fill_normal(host_v, 33u);
-
-                reference_attention(host_q, host_k, host_v, reference, shape, causal);
-
-                __nv_bfloat16* device_q = nullptr;
-                __nv_bfloat16* device_k = nullptr;
-                __nv_bfloat16* device_v = nullptr;
-                __nv_bfloat16* device_o = nullptr;
-                float* workspace = nullptr;
-                CUDA_CHECK(cudaMalloc(&device_q, bytes));
-                CUDA_CHECK(cudaMalloc(&device_k, bytes));
-                CUDA_CHECK(cudaMalloc(&device_v, bytes));
-                CUDA_CHECK(cudaMalloc(&device_o, bytes));
-                CUDA_CHECK(cudaMalloc(&workspace, unfused_workspace_bytes(shape)));
-
-                CUDA_CHECK(cudaMemcpy(device_q, host_q.data(), bytes, cudaMemcpyHostToDevice));
-                CUDA_CHECK(cudaMemcpy(device_k, host_k.data(), bytes, cudaMemcpyHostToDevice));
-                CUDA_CHECK(cudaMemcpy(device_v, host_v.data(), bytes, cudaMemcpyHostToDevice));
-
-                Buffers buffers{device_q, device_k, device_v, device_o, workspace, shape, causal};
-
-                struct Entry
+                for (int seq_len : kAccuracySeqs)
                 {
-                    const char* name;
-                    void (*func)(void*);
-                    bool (*supported)(int);
-                };
+                    const AttentionShape shape{kAccuracyBatch, kAccuracyHeads, seq_len, head_dim};
+                    const size_t count = static_cast<size_t>(shape.batch) * shape.heads * shape.seq_len * shape.head_dim;
+                    const size_t bytes = count * sizeof(__nv_bfloat16);
 
-                const Entry entries[] = {
-                    {"v0_unfused", run_unfused, [](int){return true; }}, 
-                    {"v1_fused_row", run_fused_row, fused_row_supported},
-                    {"v2a_fused_tiled", run_fused_tiling, [](int head_dim){return head_dim == 64 || head_dim == 128;}},
-                    {"v2b_fused_tiled", run_fused_tiling_v2b, [](int head_dim){return head_dim == 64 || head_dim == 128;}}
-                };
+                    std::vector<__nv_bfloat16> host_q(count);
+                    std::vector<__nv_bfloat16> host_k(count);
+                    std::vector<__nv_bfloat16> host_v(count);
+                    std::vector<__nv_bfloat16> host_o(count);
+                    std::vector<double> reference(count);
 
-                for (const Entry& entry : entries)
-                {
-                    if (!entry.supported(head_dim)) continue;
+                    fill_normal(host_q, 11u);
+                    fill_normal(host_k, 22u);
+                    fill_normal(host_v, 33u);
 
-                    CUDA_CHECK(cudaMemset(device_o, 0, bytes));
-                    entry.func(&buffers);
-                    CUDA_CHECK(cudaDeviceSynchronize());
-                    CUDA_CHECK(cudaMemcpy(host_o.data(), device_o, bytes, cudaMemcpyDeviceToHost));
+                    reference_attention(host_q, host_k, host_v, reference, shape, causal);
 
-                    const Accuracy accuracy = compare(host_o, reference, shape);
-                    std::printf("  %-16s %8d %8s %14.6e %10.2f", entry.name, head_dim, causal ? "yes" : "no", accuracy.vs_double, accuracy.ulp);
-                    if (accuracy.ulp > kUlpTolerance)
+                    __nv_bfloat16* device_q = nullptr;
+                    __nv_bfloat16* device_k = nullptr;
+                    __nv_bfloat16* device_v = nullptr;
+                    __nv_bfloat16* device_o = nullptr;
+                    float* workspace = nullptr;
+                    CUDA_CHECK(cudaMalloc(&device_q, bytes));
+                    CUDA_CHECK(cudaMalloc(&device_k, bytes));
+                    CUDA_CHECK(cudaMalloc(&device_v, bytes));
+                    CUDA_CHECK(cudaMalloc(&device_o, bytes));
+                    CUDA_CHECK(cudaMalloc(&workspace, unfused_workspace_bytes(shape)));
+
+                    CUDA_CHECK(cudaMemcpy(device_q, host_q.data(), bytes, cudaMemcpyHostToDevice));
+                    CUDA_CHECK(cudaMemcpy(device_k, host_k.data(), bytes, cudaMemcpyHostToDevice));
+                    CUDA_CHECK(cudaMemcpy(device_v, host_v.data(), bytes, cudaMemcpyHostToDevice));
+
+                    Buffers buffers{device_q, device_k, device_v, device_o, workspace, shape, causal};
+
+                    for (const Entry& entry : kEntries)
                     {
-                        std::printf("   FAIL");
-                        all_passed = false;
-                    }
-                    std::printf("\n");
-                }
+                        if (!entry.supported(head_dim)) continue;
 
-                CUDA_CHECK(cudaFree(device_q));
-                CUDA_CHECK(cudaFree(device_k));
-                CUDA_CHECK(cudaFree(device_v));
-                CUDA_CHECK(cudaFree(device_o));
-                CUDA_CHECK(cudaFree(workspace));
+                        CUDA_CHECK(cudaMemset(device_o, 0, bytes));
+                        entry.func(&buffers);
+                        CUDA_CHECK(cudaDeviceSynchronize());
+                        CUDA_CHECK(cudaMemcpy(host_o.data(), device_o, bytes, cudaMemcpyDeviceToHost));
+
+                        const Accuracy accuracy = compare(host_o, reference, shape);
+                        std::printf("  %-16s %8d %8s %6d %14.6e %10.2f", entry.name, head_dim, causal ? "yes" : "no", seq_len, accuracy.vs_double, accuracy.ulp);
+                        if (accuracy.ulp > entry.ulp_tolerance)
+                        {
+                            std::printf("   FAIL");
+                            all_passed = false;
+                        }
+                        std::printf("\n");
+                    }
+
+                    CUDA_CHECK(cudaFree(device_q));
+                    CUDA_CHECK(cudaFree(device_k));
+                    CUDA_CHECK(cudaFree(device_v));
+                    CUDA_CHECK(cudaFree(device_o));
+                    CUDA_CHECK(cudaFree(workspace));
+                }
             }
         }
         std::printf("\n");
@@ -482,6 +514,16 @@ int main()
             else std::printf(" %10s\n", "-");
         }
 
+        if (tensorcore_v3_supported(shape.head_dim))
+        {
+            const float ms = time_iterations(run_tensorcore_v3, &buffers);
+            const double gb = tensorcore_v3_hbm_bytes(shape, item.causal) / 1.0e9;
+
+            std::printf("  %-16s %10.3f %10.2f %10.3f", "v3_tensorcore", ms, flops / (ms / 1.0e3) / 1.0e12, gb);
+            if (run_v0) std::printf(" %9.2fx\n", baseline_ms / ms);
+            else std::printf(" %10s\n", "-");
+        }
+
         std::printf("\n");
 
         CUDA_CHECK(cudaFree(device_q));
@@ -493,10 +535,10 @@ int main()
 
     if (!all_passed)
     {
-        std::printf("FAILED: at least one kernel exceeded %.1f bf16 ULP at the row scale.\n", kUlpTolerance);
+        std::printf("FAILED: at least one kernel exceeded its bf16 ULP tolerance at the row scale.\n");
         return EXIT_FAILURE;
     }
 
-    std::printf("all kernels within %.1f bf16 ULP at the row scale.\n", kUlpTolerance);
+    std::printf("all kernels within their bf16 ULP tolerance at the row scale.\n");
     return EXIT_SUCCESS;
 }
