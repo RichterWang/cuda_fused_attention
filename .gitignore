@@ -4,11 +4,25 @@
 *.o
 *.a
 
+# Python bytecode from plot/make_figures.py
+__pycache__/
+*.pyc
+
 # Nsight Compute reports and generated measurements
 /results/raw/*
 !/results/raw/.gitkeep
+# Stage-timing tables and the main grid CSV are cited by the report, so keep them.
+!/results/raw/*.csv
+# The directory itself must be re-included first: git never descends into an
+# excluded directory, so a file-level exception inside one has no effect.
+!/results/raw/flash_attention/
+!/results/raw/flash_attention/*.csv
 /results/figures/*
 !/results/figures/.gitkeep
+# Figures and their documentation are deliverables once the protocol is frozen.
+!/results/figures/*.png
+!/results/figures/*.svg
+!/results/figures/*.md
 /results/ncu/*
 !/results/ncu/.gitkeep
 *.ncu-rep
@@ -21,5 +35,13 @@
 # User-specific files
 /personal
 
+# LaTeX working package. Only the compiled report is submitted, as
+# docs/project_report.pdf; the source, figure copies and evidence manifest stay
+# local.
+/tex_workspace/
+
 # Generated ablation measurements and profiler reports
 /kernels/ablation/result/
+
+# V3 debug dumps (FA_V3_DEBUG_DUMP=ON, written to the working directory)
+v3_dump_*.bin

@@ -95,4 +95,15 @@ FusedTilingInfo query_tensorcore_v3(int head_dim);
 
 double tensorcore_v3_hbm_bytes(const AttentionShape& shape, bool causal);
 
+// v3b is the same tiling and the same arithmetic as v3 with a different
+// schedule: PV is deferred one tile so that each tile needs one barrier instead
+// of two, and the QK and PV mma phases end up back to back. Same traffic.
+bool tensorcore_v3b_supported(int head_dim);
+
+void launch_attention_tensorcore_v3b(const __nv_bfloat16* q, const __nv_bfloat16* k, const __nv_bfloat16* v, __nv_bfloat16* o, const AttentionShape& shape, bool causal, cudaStream_t stream = nullptr);
+
+FusedTilingInfo query_tensorcore_v3b(int head_dim);
+
+double tensorcore_v3b_hbm_bytes(const AttentionShape& shape, bool causal);
+
 }  // namespace cuda_op_lab::flash_attention

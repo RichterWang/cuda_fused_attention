@@ -35,6 +35,10 @@ using cuda_op_lab::flash_attention::fused_tiling_hbm_bytes;
 using cuda_op_lab::flash_attention::launch_attention_fusedtiling_v2b;
 using cuda_op_lab::flash_attention::query_fused_tiling_v2b;
 using cuda_op_lab::flash_attention::fused_tiling_v2b_hbm_bytes;
+using cuda_op_lab::flash_attention::launch_attention_tensorcore_v3;
+using cuda_op_lab::flash_attention::query_tensorcore_v3;
+using cuda_op_lab::flash_attention::tensorcore_v3_supported;
+using cuda_op_lab::flash_attention::tensorcore_v3_hbm_bytes;
 
 constexpr int kWarmupIters = 5;
 constexpr int kTimedIters = 30;
@@ -359,6 +363,12 @@ void run_fused_tiling_v2b(void* context)
     launch_attention_fusedtiling_v2b(buffers.q, buffers.k, buffers.v, buffers.o, buffers.shape, buffers.causal, nullptr);
 }
 
+void run_tensorcore_v3(void* context)
+{
+    Buffers& buffers = *static_cast<Buffers*>(context);
+    launch_attention_tensorcore_v3(buffers.q, buffers.k, buffers.v, buffers.o, buffers.shape, buffers.causal, nullptr);
+}
+
 struct Entry
 {
     const char* name;
@@ -372,7 +382,8 @@ const Entry kEntries[] = {
     {"v2a_fused_tiled", run_fused_tiling,
      [](int d){ return query_fused_tiling(d).supported; }},
     {"v2b_fused_tiled", run_fused_tiling_v2b,
-     [](int d){ return query_fused_tiling_v2b(d).supported; }}
+     [](int d){ return query_fused_tiling_v2b(d).supported; }},
+    {"v3_tensorcore", run_tensorcore_v3, tensorcore_v3_supported}
 };
 
 }  // namespace
@@ -463,6 +474,22 @@ int main(int argc, char** argv)
     std::printf("  %10s %10s %8s %8s %14s %8s %8s %12s %12s\n", "head_dim", "block", "tile_kv", "q_rows", "shared/block", "regs", "local", "blocks/SM", "smem-capped");
     for (int head_dim : {64, 128}) {
         const FusedTilingInfo info = query_fused_tiling_v2b(head_dim);
+        if (!info.supported) {
+            std::printf("  %10d   unsupported\n", head_dim);
+            continue;
+        }
+        std::printf("  %10d %10d %8d %8d %12dB %8d %7dB %12d %12d\n",
+                    head_dim, info.block_size, info.tile_kv, info.rows_per_block,
+                    info.shared_bytes_per_block, info.registers_per_thread,
+                    info.local_bytes_per_thread, info.max_blocks_per_sm,
+                    info.shared_limited_blocks_per_sm);
+    }
+    std::printf("\n");
+
+    std::printf("v3 configuration (tensor core, 64 query rows per block):\n");
+    std::printf("  %10s %10s %8s %8s %14s %8s %8s %12s %12s\n", "head_dim", "block", "tile_kv", "q_rows", "shared/block", "regs", "local", "blocks/SM", "smem-capped");
+    for (int head_dim : {64, 128}) {
+        const FusedTilingInfo info = query_tensorcore_v3(head_dim);
         if (!info.supported) {
             std::printf("  %10d   unsupported\n", head_dim);
             continue;
@@ -617,8 +644,10 @@ int main(int argc, char** argv)
             (qkvo_bytes(shape) + unfused_score_bytes(shape)) / 1.0e9,
             (qkvo_bytes(shape) + kv_reread) / 1.0e9,
             fused_tiling_hbm_bytes(shape, item.causal) / 1.0e9,
-            fused_tiling_v2b_hbm_bytes(shape, item.causal) / 1.0e9
+            fused_tiling_v2b_hbm_bytes(shape, item.causal) / 1.0e9,
+            tensorcore_v3_hbm_bytes(shape, item.causal) / 1.0e9
         };
+        // Index-aligned with kEntries; add a row here whenever one is added there.
 
         for (size_t index = 0; index < sizeof(kEntries) / sizeof(kEntries[0]); ++index)
         {

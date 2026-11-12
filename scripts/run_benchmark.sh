@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
+# Historical name; the documented entry point is run_full_benchmark.sh.
 set -euo pipefail
-
-build_dir="${1:-build}"
-"$build_dir/bench_flash_attention"
+exec "$(dirname "$0")/run_full_benchmark.sh" "$@"

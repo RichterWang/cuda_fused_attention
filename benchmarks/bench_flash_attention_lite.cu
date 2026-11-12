@@ -31,6 +31,9 @@ using cuda_op_lab::flash_attention::fused_tiling_v2b_hbm_bytes;
 using cuda_op_lab::flash_attention::launch_attention_tensorcore_v3;
 using cuda_op_lab::flash_attention::tensorcore_v3_supported;
 using cuda_op_lab::flash_attention::tensorcore_v3_hbm_bytes;
+using cuda_op_lab::flash_attention::launch_attention_tensorcore_v3b;
+using cuda_op_lab::flash_attention::tensorcore_v3b_supported;
+using cuda_op_lab::flash_attention::tensorcore_v3b_hbm_bytes;
 
 constexpr int kWarmupIters = 3;
 constexpr int kTimedIters = 10;
@@ -47,10 +50,11 @@ const std::vector<int> kAccuracySeqs = {1, 63, 64, 65, 129, 256};
 // ULP torlance
 constexpr float kUlpTolerance = 2.0f;
 
-// v3 rounds P to bf16 before the PV mma, so its row-scale error is larger by
-// construction. This is a separate documented number, not a relaxation of the
-// shared tolerance; confirm it once v3 actually produces output.
-constexpr float kV3UlpTolerance = 8.0f;
+// v3 rounds P to bf16 before the PV mma, which inflates the per-element relative
+// error while the row-scale error stays at 1.00 ULP on every accuracy shape. It
+// therefore keeps the same gate as the other kernels; only raise this if a shape
+// proves the bf16 P trade-off actually costs more.
+constexpr float kV3UlpTolerance = 2.0f;
 
 // the upper bound of the memory size(on 3070Ti)
 constexpr size_t kMaxWorkspaceBytes = 1ull << 30;  // 1 GB
@@ -265,6 +269,12 @@ void run_tensorcore_v3(void* context)
     launch_attention_tensorcore_v3(buffers.q, buffers.k, buffers.v, buffers.o, buffers.shape, buffers.causal, nullptr);
 }
 
+void run_tensorcore_v3b(void* context)
+{
+    Buffers& buffers = *static_cast<Buffers*>(context);
+    launch_attention_tensorcore_v3b(buffers.q, buffers.k, buffers.v, buffers.o, buffers.shape, buffers.causal, nullptr);
+}
+
 // One registry for the accuracy section, so a new kernel is added in one place.
 // Each entry carries its own tolerance: v3's bf16 P is a deliberate trade-off,
 // not a reason to loosen the tolerance every other kernel is held to.
@@ -281,7 +291,8 @@ const Entry kEntries[] = {
     {"v1_fused_row", run_fused_row, fused_row_supported, kUlpTolerance},
     {"v2a_fused_tiled", run_fused_tiling, [](int head_dim){ return head_dim == 64 || head_dim == 128; }, kUlpTolerance},
     {"v2b_fused_tiled", run_fused_tiling_v2b, [](int head_dim){ return head_dim == 64 || head_dim == 128; }, kUlpTolerance},
-    {"v3_tensorcore", run_tensorcore_v3, tensorcore_v3_supported, kV3UlpTolerance}
+    {"v3_tensorcore", run_tensorcore_v3, tensorcore_v3_supported, kV3UlpTolerance},
+    {"v3b_tensorcore", run_tensorcore_v3b, tensorcore_v3b_supported, kV3UlpTolerance}
 };
 
 }  // namespace
@@ -297,7 +308,7 @@ int main()
     std::printf("device: %s  (sm_%d%d)\n", props.name, props.major, props.minor);
     std::printf("dtype: bf16 storage, fp32 accumulate\n");
     std::printf("HBM GB is the algorithmic traffic, not a profiler reading: v0 includes the fp32 score matrix, fused kernels do not.\n");
-    std::printf("accuracy: ulp is the pass/fail number, measured at the row scale (not per element -- attention output cancels), tolerance %.1f except v3 %.1f (it rounds P to bf16)\n\n", kUlpTolerance, kV3UlpTolerance);
+    std::printf("accuracy: ulp is the pass/fail number, measured at the row scale (not per element -- attention output cancels), tolerance %.1f for every kernel including v3 (it rounds P to bf16 but still measures 1.0)\n\n", kUlpTolerance);
 
     // v1 configuration printing
     std::printf("v1 configuration (local_bytes must be 0, or the output accumulator spilled):\n");
@@ -520,6 +531,16 @@ int main()
             const double gb = tensorcore_v3_hbm_bytes(shape, item.causal) / 1.0e9;
 
             std::printf("  %-16s %10.3f %10.2f %10.3f", "v3_tensorcore", ms, flops / (ms / 1.0e3) / 1.0e12, gb);
+            if (run_v0) std::printf(" %9.2fx\n", baseline_ms / ms);
+            else std::printf(" %10s\n", "-");
+        }
+
+        if (tensorcore_v3b_supported(shape.head_dim))
+        {
+            const float ms = time_iterations(run_tensorcore_v3b, &buffers);
+            const double gb = tensorcore_v3b_hbm_bytes(shape, item.causal) / 1.0e9;
+
+            std::printf("  %-16s %10.3f %10.2f %10.3f", "v3b_tensorcore", ms, flops / (ms / 1.0e3) / 1.0e12, gb);
             if (run_v0) std::printf(" %9.2fx\n", baseline_ms / ms);
             else std::printf(" %10s\n", "-");
         }

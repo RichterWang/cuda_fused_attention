@@ -1,0 +1,537 @@
+device: NVIDIA GeForce RTX 3070 Ti Laptop GPU  (sm_86)
+dtype: bf16 storage, fp32 accumulate
+HBM GB is the algorithmic traffic, not a profiler reading: v0 includes the fp32 score matrix, fused kernels do not.
+accuracy: finite outputs/reference and row-scale ULP <= 2.0 are required.
+row_scaled_error = max |O-O_ref| / max(row max |O_ref|, 1.0e-06); max_abs_error = max |O-O_ref|.
+FP64 error metrics use the small accuracy suite; every performance case also checks output NaN/Inf.
+timing: 5 warmups, 30 individual CUDA-event samples; median and IQR (Q3-Q1).
+speedup = V0 median / kernel median for the same shape and mask.
+CSV output: results/raw/flash_attention (existing files are replaced)
+
+v1 configuration (local_bytes must be 0, or the output accumulator spilled):
+    head_dim      block   tile_n   shared/block     regs    local    blocks/SM
+          64        128       64        33808B       48       0B            2
+         128        128       32        34064B       48       0B            2
+
+v2 configuration (dynamic shared, bank-conflict-free K reads):
+    head_dim      block  tile_kv   q_rows   shared/block     regs    local    blocks/SM  smem-capped
+          64        256       64        8        28672B       49       0B            3            3
+         128        256       64        8        55296B       57       0B            1            1
+  shared budget: 102400 B/SM. smem-capped is that budget divided by shared/block;
+  if blocks/SM is lower, registers or the warp limit bind first.
+
+v2b configuration (independent experiment baseline):
+    head_dim      block  tile_kv   q_rows   shared/block     regs    local    blocks/SM  smem-capped
+          64        256       64        8        28672B       47       0B            3            3
+         128        256       64        8        55296B       61       0B            1            1
+
+v3 configuration (tensor core, 64 query rows per block):
+    head_dim      block  tile_kv   q_rows   shared/block     regs    local    blocks/SM  smem-capped
+          64        128       64       64        32768B      165       0B            3            3
+         128        128       32       64        32768B      218       0B            2            3
+
+accuracy check (batch=1 heads=2 seq=256):
+  kernel           head_dim   causal    vs_double   row_scaled      max_abs      ulp out_nan out_inf ref_nan ref_inf status
+  v0_unfused             64       no   3.8906e-03   3.5299e-03   1.7500e-03     0.50       0       0       0       0   PASS
+  v1_fused_row           64       no   6.8330e-03   3.5299e-03   1.7500e-03     0.50       0       0       0       0   PASS
+  v2a_fused_tiled        64       no   3.8906e-03   3.5299e-03   1.7500e-03     0.50       0       0       0       0   PASS
+  v2b_fused_tiled        64       no   3.8906e-03   3.5299e-03   1.7500e-03     0.50       0       0       0       0   PASS
+  v3_tensorcore          64       no   3.3140e+02   5.0755e-03   1.7500e-03     1.00       0       0       0       0   PASS
+  v0_unfused             64      yes   3.8877e-03   3.6229e-03   3.9011e-03     0.50       0       0       0       0   PASS
+  v1_fused_row           64      yes   3.8877e-03   3.6229e-03   3.9011e-03     0.50       0       0       0       0   PASS
+  v2a_fused_tiled        64      yes   3.8877e-03   3.6229e-03   3.9011e-03     0.50       0       0       0       0   PASS
+  v2b_fused_tiled        64      yes   3.8877e-03   3.6229e-03   3.9011e-03     0.50       0       0       0       0   PASS
+  v3_tensorcore          64      yes   1.3746e+01   5.4957e-03   4.8899e-03     1.00       0       0       0       0   PASS
+  v0_unfused            128       no   3.8652e-02   3.7336e-03   1.8823e-03     0.06       0       0       0       0   PASS
+  v1_fused_row          128       no   3.8917e-03   3.7336e-03   1.8823e-03     0.50       0       0       0       0   PASS
+  v2a_fused_tiled       128       no   1.9134e-02   3.7336e-03   1.8823e-03     0.50       0       0       0       0   PASS
+  v2b_fused_tiled       128       no   1.9134e-02   3.7336e-03   1.8823e-03     0.50       0       0       0       0   PASS
+  v3_tensorcore         128       no   1.6238e+02   4.7433e-03   1.8823e-03     1.00       0       0       0       0   PASS
+  v0_unfused            128      yes   7.7641e-03   3.6173e-03   4.7807e-03     0.50       0       0       0       0   PASS
+  v1_fused_row          128      yes   5.8251e-03   3.6173e-03   4.7807e-03     0.25       0       0       0       0   PASS
+  v2a_fused_tiled       128      yes   3.4077e-02   3.6173e-03   4.7807e-03     0.50       0       0       0       0   PASS
+  v2b_fused_tiled       128      yes   3.4077e-02   3.6173e-03   4.7807e-03     0.50       0       0       0       0   PASS
+  v3_tensorcore         128      yes   1.3260e+02   4.8241e-03   4.7807e-03     1.00       0       0       0       0   PASS
+
+batch=1 heads=8 seq=128 head_dim=64 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           0.1382     0.0010       0.24      0.003      1.00x       0       0
+  v1_fused_row         0.2273     0.0000       0.15      0.034      0.61x       0       0
+  v2a_fused_tiled      0.0276     0.0010       1.21      0.004      5.00x       0       0
+  v2b_fused_tiled      0.0184     0.0000       1.82      0.004      7.50x       0       0
+  v3_tensorcore        0.0113     0.0008       2.98      0.001     12.27x       0       0
+
+batch=1 heads=8 seq=128 head_dim=64 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           0.1085     0.0020       0.16      0.003      1.00x       0       0
+  v1_fused_row         0.1270     0.0010       0.13      0.017      0.85x       0       0
+  v2a_fused_tiled      0.0266     0.0000       0.64      0.003      4.08x       0       0
+  v2b_fused_tiled      0.0184     0.0008       0.92      0.003      5.89x       0       0
+  v3_tensorcore        0.0113     0.0000       1.50      0.001      9.64x       0       0
+
+batch=1 heads=8 seq=128 head_dim=128 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           0.2447     0.0010       0.27      0.004      1.00x       0       0
+  v1_fused_row         0.4879     0.0502       0.14      0.068      0.50x       0       0
+  v2a_fused_tiled      0.0461     0.0000       1.46      0.009      5.31x       0       0
+  v2b_fused_tiled      0.0307     0.0010       2.18      0.009      7.97x       0       0
+  v3_tensorcore        0.0154     0.0000       4.37      0.002     15.93x       0       0
+
+batch=1 heads=8 seq=128 head_dim=128 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           0.1628     0.0044       0.21      0.004      1.00x       0       0
+  v1_fused_row         0.2345     0.0015       0.14      0.035      0.69x       0       0
+  v2a_fused_tiled      0.0369     0.0010       0.92      0.007      4.42x       0       0
+  v2b_fused_tiled      0.0256     0.0010       1.32      0.007      6.36x       0       0
+  v3_tensorcore        0.0154     0.0000       2.20      0.001     10.60x       0       0
+
+batch=1 heads=8 seq=512 head_dim=64 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           1.5421     0.0010       0.35      0.044      1.00x       0       0
+  v1_fused_row         2.8452     0.6328       0.19      0.539      0.54x       0       0
+  v2a_fused_tiled      0.2396     0.0000       2.24      0.068      6.44x       0       0
+  v2b_fused_tiled      0.1505     0.0010       3.57      0.068     10.24x       0       0
+  v3_tensorcore        0.0287     0.0000      18.72      0.009     53.79x       0       0
+
+batch=1 heads=8 seq=512 head_dim=64 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           0.7629     0.0010       0.35      0.044      1.00x       0       0
+  v1_fused_row         1.2247     0.0028       0.22      0.271      0.62x       0       0
+  v2a_fused_tiled      0.1521     0.0061       1.77      0.039      5.02x       0       0
+  v2b_fused_tiled      0.0922     0.0020       2.92      0.039      8.28x       0       0
+  v3_tensorcore        0.0246     0.0000      10.94      0.006     31.04x       0       0
+
+batch=1 heads=8 seq=512 head_dim=128 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           2.3491     0.0010       0.46      0.046      1.00x       0       0
+  v1_fused_row         5.2152     0.0102       0.21      1.078      0.45x       0       0
+  v2a_fused_tiled      0.4966     0.0010       2.16      0.136      4.73x       0       0
+  v2b_fused_tiled      0.3072     0.0000       3.50      0.136      7.65x       0       0
+  v3_tensorcore        0.0522     0.0000      20.56      0.019     44.98x       0       0
+
+batch=1 heads=8 seq=512 head_dim=128 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           1.4326     0.0010       0.38      0.046      1.00x       0       0
+  v1_fused_row         2.6788     0.0041       0.20      0.541      0.53x       0       0
+  v2a_fused_tiled      0.2847     0.0000       1.89      0.078      5.03x       0       0
+  v2b_fused_tiled      0.1782     0.0010       3.02      0.078      8.04x       0       0
+  v3_tensorcore        0.0456     0.0010      11.81      0.012     31.45x       0       0
+
+batch=1 heads=8 seq=1024 head_dim=64 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           4.7345     0.0010       0.45      0.172      1.00x       0       0
+  v1_fused_row         9.3655     0.0028       0.23      2.152      0.51x       0       0
+  v2a_fused_tiled      0.8970     0.0010       2.39      0.271      5.28x       0       0
+  v2b_fused_tiled      0.5479     0.0010       3.92      0.271      8.64x       0       0
+  v3_tensorcore        0.0748     0.0000      28.73      0.036     63.34x       0       0
+
+batch=1 heads=8 seq=1024 head_dim=64 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           2.9430     0.0707       0.37      0.172      1.00x       0       0
+  v1_fused_row         4.8097     0.0056       0.22      1.078      0.61x       0       0
+  v2a_fused_tiled      0.5100     0.0069       2.11      0.145      5.77x       0       0
+  v2b_fused_tiled      0.3062     0.0028       3.51      0.145      9.61x       0       0
+  v3_tensorcore        0.0666     0.0000      16.15      0.020     44.22x       0       0
+
+batch=1 heads=8 seq=1024 head_dim=128 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           9.3215     0.0038       0.46      0.176      1.00x       0       0
+  v1_fused_row        21.5055     0.0051       0.20      4.303      0.43x       0       0
+  v2a_fused_tiled      1.8944     0.0010       2.27      0.541      4.92x       0       0
+  v2b_fused_tiled      1.2042     0.0277       3.57      0.541      7.74x       0       0
+  v3_tensorcore        0.1628     0.0010      26.38      0.071     57.25x       0       0
+
+batch=1 heads=8 seq=1024 head_dim=128 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           5.6187     0.0018       0.38      0.176      1.00x       0       0
+  v1_fused_row        10.5006     0.0158       0.20      2.156      0.54x       0       0
+  v2a_fused_tiled      1.0250     0.0082       2.10      0.289      5.48x       0       0
+  v2b_fused_tiled      0.6390     0.0010       3.36      0.289      8.79x       0       0
+  v3_tensorcore        0.1075     0.0148      19.99      0.040     52.26x       0       0
+
+batch=1 heads=8 seq=2048 head_dim=64 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          18.8462     0.1490       0.46      0.679      1.00x       0       0
+  v1_fused_row        38.1563     0.0061       0.23      8.598      0.49x       0       0
+  v2a_fused_tiled      3.6844     0.0010       2.33      1.078      5.12x       0       0
+  v2b_fused_tiled      2.4719     0.2568       3.47      1.078      7.62x       0       0
+  v3_tensorcore        0.3205     0.0010      26.80      0.138     58.80x       0       0
+
+batch=1 heads=8 seq=2048 head_dim=64 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          11.5753     0.0049       0.37      0.679      1.00x       0       0
+  v1_fused_row        18.9169     0.0788       0.23      4.303      0.61x       0       0
+  v2a_fused_tiled      1.9087     0.0950       2.25      0.558      6.06x       0       0
+  v2b_fused_tiled      1.1607     0.1454       3.70      0.558      9.97x       0       0
+  v3_tensorcore        0.2063     0.0130      20.83      0.073     56.10x       0       0
+
+batch=1 heads=8 seq=2048 head_dim=128 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          36.8701     0.0087       0.47      0.688      1.00x       0       0
+  v1_fused_row        83.5707     0.0069       0.21     17.197      0.44x       0       0
+  v2a_fused_tiled      7.5607     0.0612       2.27      2.156      4.88x       0       0
+  v2b_fused_tiled      5.0668     0.0028       3.39      2.156      7.28x       0       0
+  v3_tensorcore        0.5960     0.0000      28.83      0.277     61.87x       0       0
+
+batch=1 heads=8 seq=2048 head_dim=128 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          22.1768     0.1759       0.39      0.688      1.00x       0       0
+  v1_fused_row        41.3880     0.0205       0.21      8.607      0.54x       0       0
+  v2a_fused_tiled      3.9619     0.0031       2.17      1.116      5.60x       0       0
+  v2b_fused_tiled      2.6552     0.2235       3.24      1.116      8.35x       0       0
+  v3_tensorcore        0.3845     0.0108      22.35      0.147     57.68x       0       0
+
+batch=1 heads=8 seq=4096 head_dim=64 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          79.9555     0.0527       0.43      2.701      1.00x       0       0
+  v1_fused_row       150.1169     0.0124       0.23     34.377      0.53x       0       0
+  v2a_fused_tiled     14.7871     0.1318       2.32      4.303      5.41x       0       0
+  v2b_fused_tiled      9.9215     0.2051       3.46      4.303      8.06x       0       0
+  v3_tensorcore        1.2232     0.0241      28.09      0.545     65.37x       0       0
+
+batch=1 heads=8 seq=4096 head_dim=64 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          50.4950     1.4428       0.34      2.701      1.00x       0       0
+  v1_fused_row        74.6793     0.0253       0.23     17.197      0.68x       0       0
+  v2a_fused_tiled      7.5361     0.0067       2.28      2.189      6.70x       0       0
+  v2b_fused_tiled      5.0765     0.0143       3.39      2.189      9.95x       0       0
+  v3_tensorcore        0.6794     0.0287      25.29      0.281     74.32x       0       0
+
+batch=1 heads=8 seq=4096 head_dim=128 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused         156.4319     0.4861       0.44      2.718      1.00x       0       0
+  v1_fused_row       329.1489     0.0223       0.21     68.753      0.48x       0       0
+  v2a_fused_tiled     30.5121     0.5565       2.25      8.607      5.13x       0       0
+  v2b_fused_tiled     20.5978     0.1940       3.34      8.607      7.59x       0       0
+  v3_tensorcore        2.3117     0.1234      29.73      1.091     67.67x       0       0
+
+batch=1 heads=8 seq=4096 head_dim=128 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          96.9134     0.5189       0.35      2.718      1.00x       0       0
+  v1_fused_row       164.2767     0.0883       0.21     34.393      0.59x       0       0
+  v2a_fused_tiled     15.6436     0.0020       2.20      4.379      6.20x       0       0
+  v2b_fused_tiled     10.4929     0.2048       3.28      4.379      9.24x       0       0
+  v3_tensorcore        1.2559     0.0512      27.36      0.562     77.16x       0       0
+
+batch=2 heads=8 seq=128 head_dim=64 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           0.1987     0.0010       0.34      0.006      1.00x       0       0
+  v1_fused_row         0.3369     0.0154       0.20      0.068      0.59x       0       0
+  v2a_fused_tiled      0.0358     0.0010       1.87      0.009      5.54x       0       0
+  v2b_fused_tiled      0.0236     0.0000       2.85      0.009      8.43x       0       0
+  v3_tensorcore        0.0092     0.0000       7.28      0.002     21.56x       0       0
+
+batch=2 heads=8 seq=128 head_dim=64 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           0.1362     0.0020       0.25      0.006      1.00x       0       0
+  v1_fused_row         0.1690     0.0010       0.20      0.035      0.81x       0       0
+  v2a_fused_tiled      0.0307     0.0000       1.10      0.007      4.43x       0       0
+  v2b_fused_tiled      0.0215     0.0010       1.57      0.007      6.33x       0       0
+  v3_tensorcore        0.0092     0.0010       3.67      0.001     14.78x       0       0
+
+batch=2 heads=8 seq=128 head_dim=128 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           0.3318     0.0016       0.40      0.007      1.00x       0       0
+  v1_fused_row         0.6820     0.0000       0.20      0.136      0.49x       0       0
+  v2a_fused_tiled      0.0685     0.0010       1.96      0.018      4.84x       0       0
+  v2b_fused_tiled      0.0451     0.0010       2.98      0.018      7.36x       0       0
+  v3_tensorcore        0.0133     0.0010      10.08      0.003     24.92x       0       0
+
+batch=2 heads=8 seq=128 head_dim=128 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           0.2273     0.0020       0.30      0.007      1.00x       0       0
+  v1_fused_row         0.3543     0.0008       0.19      0.069      0.64x       0       0
+  v2a_fused_tiled      0.0522     0.0010       1.30      0.014      4.35x       0       0
+  v2b_fused_tiled      0.0348     0.0000       1.94      0.014      6.53x       0       0
+  v3_tensorcore        0.0123     0.0000       5.50      0.003     18.50x       0       0
+
+batch=2 heads=8 seq=512 head_dim=64 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           2.4310     0.0010       0.44      0.088      1.00x       0       0
+  v1_fused_row         4.7483     0.0404       0.23      1.078      0.51x       0       0
+  v2a_fused_tiled      0.4516     0.0007       2.38      0.136      5.38x       0       0
+  v2b_fused_tiled      0.2970     0.0020       3.62      0.136      8.19x       0       0
+  v3_tensorcore        0.0399     0.0000      26.89      0.019     60.87x       0       0
+
+batch=2 heads=8 seq=512 head_dim=64 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           1.5329     0.0123       0.35      0.088      1.00x       0       0
+  v1_fused_row         2.4392     0.0123       0.22      0.541      0.63x       0       0
+  v2a_fused_tiled      0.2755     0.0051       1.95      0.078      5.57x       0       0
+  v2b_fused_tiled      0.1653     0.0041       3.25      0.078      9.27x       0       0
+  v3_tensorcore        0.0379     0.0000      14.20      0.012     40.46x       0       0
+
+batch=2 heads=8 seq=512 head_dim=128 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           4.7063     0.0020       0.46      0.092      1.00x       0       0
+  v1_fused_row        11.0193     0.0104       0.19      2.156      0.43x       0       0
+  v2a_fused_tiled      0.9539     0.0082       2.25      0.273      4.93x       0       0
+  v2b_fused_tiled      0.6001     0.0033       3.58      0.273      7.84x       0       0
+  v3_tensorcore        0.0829     0.0000      25.89      0.038     56.74x       0       0
+
+batch=2 heads=8 seq=512 head_dim=128 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           2.8611     0.0010       0.38      0.092      1.00x       0       0
+  v1_fused_row         5.3468     0.0049       0.20      1.082      0.54x       0       0
+  v2a_fused_tiled      0.5468     0.0000       1.97      0.155      5.23x       0       0
+  v2b_fused_tiled      0.3430     0.0000       3.14      0.155      8.34x       0       0
+  v3_tensorcore        0.0655     0.0018      16.42      0.023     43.66x       0       0
+
+batch=2 heads=8 seq=1024 head_dim=64 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           9.5099     0.0064       0.45      0.344      1.00x       0       0
+  v1_fused_row        19.5205     0.0079       0.22      4.303      0.49x       0       0
+  v2a_fused_tiled      1.8975     0.1567       2.26      0.541      5.01x       0       0
+  v2b_fused_tiled      1.1213     0.1492       3.83      0.541      8.48x       0       0
+  v3_tensorcore        0.1690     0.0000      25.42      0.071     56.28x       0       0
+
+batch=2 heads=8 seq=1024 head_dim=64 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           5.8552     0.0333       0.37      0.344      1.00x       0       0
+  v1_fused_row         9.6312     0.0108       0.22      2.156      0.61x       0       0
+  v2a_fused_tiled      0.9754     0.0223       2.20      0.289      6.00x       0       0
+  v2b_fused_tiled      0.6103     0.0046       3.52      0.289      9.59x       0       0
+  v3_tensorcore        0.1101     0.0061      19.53      0.040     53.19x       0       0
+
+batch=2 heads=8 seq=1024 head_dim=128 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          18.4494     0.0817       0.47      0.352      1.00x       0       0
+  v1_fused_row        42.8524     0.0046       0.20      8.607      0.43x       0       0
+  v2a_fused_tiled      3.8615     0.0010       2.22      1.082      4.78x       0       0
+  v2b_fused_tiled      2.5958     0.1188       3.31      1.082      7.11x       0       0
+  v3_tensorcore        0.3154     0.0008      27.24      0.143     58.50x       0       0
+
+batch=2 heads=8 seq=1024 head_dim=128 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          11.2133     0.0896       0.38      0.352      1.00x       0       0
+  v1_fused_row        20.8988     0.1101       0.21      4.312      0.54x       0       0
+  v2a_fused_tiled      2.0132     0.0530       2.14      0.579      5.57x       0       0
+  v2b_fused_tiled      1.2677     0.1444       3.39      0.579      8.85x       0       0
+  v3_tensorcore        0.2089     0.0072      20.58      0.080     53.68x       0       0
+
+batch=2 heads=8 seq=2048 head_dim=64 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          38.5459     0.3180       0.45      1.359      1.00x       0       0
+  v1_fused_row        76.0648     0.0087       0.23     17.197      0.51x       0       0
+  v2a_fused_tiled      7.5438     0.0020       2.28      2.156      5.11x       0       0
+  v2b_fused_tiled      5.0196     0.0010       3.42      2.156      7.68x       0       0
+  v3_tensorcore        0.6134     0.0166      28.01      0.277     62.84x       0       0
+
+batch=2 heads=8 seq=2048 head_dim=64 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          23.6022     0.5530       0.36      1.359      1.00x       0       0
+  v1_fused_row        37.7032     0.0169       0.23      8.607      0.63x       0       0
+  v2a_fused_tiled      3.9183     0.0361       2.19      1.116      6.02x       0       0
+  v2b_fused_tiled      2.6220     0.0348       3.28      1.116      9.00x       0       0
+  v3_tensorcore        0.3640     0.0192      23.61      0.147     64.84x       0       0
+
+batch=2 heads=8 seq=2048 head_dim=128 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          77.9474     1.7231       0.44      1.376      1.00x       0       0
+  v1_fused_row       166.7170     0.0120       0.21     34.393      0.47x       0       0
+  v2a_fused_tiled     15.3984     0.0031       2.23      4.312      5.06x       0       0
+  v2b_fused_tiled     10.3168     0.2865       3.33      4.312      7.56x       0       0
+  v3_tensorcore        1.1622     0.0338      29.56      0.554     67.07x       0       0
+
+batch=2 heads=8 seq=2048 head_dim=128 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          46.3442     2.0511       0.37      1.376      1.00x       0       0
+  v1_fused_row        82.4683     0.0509       0.21     17.213      0.56x       0       0
+  v2a_fused_tiled      7.9657     0.0061       2.16      2.231      5.82x       0       0
+  v2b_fused_tiled      5.3494     0.0018       3.21      2.231      8.66x       0       0
+  v3_tensorcore        0.6513     0.0358      26.39      0.294     71.16x       0       0
+
+batch=2 heads=8 seq=4096 head_dim=64 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused         165.2178     2.1194       0.42      5.402      1.00x       0       0
+  v1_fused_row       300.2224     0.0115       0.23     68.753      0.55x       0       0
+  v2a_fused_tiled     30.1819     0.4964       2.28      8.607      5.47x       0       0
+  v2b_fused_tiled     20.3213     0.2117       3.38      8.607      8.13x       0       0
+  v3_tensorcore        2.2789     0.0010      30.15      1.091     72.50x       0       0
+
+batch=2 heads=8 seq=4096 head_dim=64 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused         105.0148     1.6215       0.33      5.402      1.00x       0       0
+  v1_fused_row       149.4610     0.0289       0.23     34.393      0.70x       0       0
+  v2a_fused_tiled     15.3636     0.1336       2.24      4.379      6.84x       0       0
+  v2b_fused_tiled     10.4694     0.2299       3.28      4.379     10.03x       0       0
+  v3_tensorcore        1.2513     0.0691      27.47      0.562     83.92x       0       0
+
+batch=2 heads=8 seq=4096 head_dim=128 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused         315.0571     1.2685       0.44      5.436      1.00x       0       0
+  v1_fused_row       661.5219     0.0348       0.21    137.506      0.48x       0       0
+  v2a_fused_tiled     62.8265     1.0811       2.19     17.213      5.01x       0       0
+  v2b_fused_tiled     42.1796     0.1167       3.26     17.213      7.47x       0       0
+  v3_tensorcore        4.5640     0.0031      30.11      2.181     69.03x       0       0
+
+batch=2 heads=8 seq=4096 head_dim=128 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused         196.2445     1.0893       0.35      5.436      1.00x       0       0
+  v1_fused_row       328.4603     0.2353       0.21     68.787      0.60x       0       0
+  v2a_fused_tiled     31.9483     0.8832       2.15      8.758      6.14x       0       0
+  v2b_fused_tiled     21.4804     0.2127       3.20      8.758      9.14x       0       0
+  v3_tensorcore        2.4602     0.0323      27.94      1.124     79.77x       0       0
+
+batch=4 heads=8 seq=128 head_dim=64 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           0.3635     0.0172       0.37      0.013      1.00x       0       0
+  v1_fused_row         0.6390     0.0112       0.21      0.136      0.57x       0       0
+  v2a_fused_tiled      0.0676     0.0010       1.99      0.018      5.38x       0       0
+  v2b_fused_tiled      0.0430     0.0010       3.12      0.018      8.45x       0       0
+  v3_tensorcore        0.0113     0.0010      11.92      0.003     32.27x       0       0
+
+batch=4 heads=8 seq=128 head_dim=64 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           0.2468     0.0031       0.27      0.013      1.00x       0       0
+  v1_fused_row         0.3226     0.0000       0.21      0.069      0.77x       0       0
+  v2a_fused_tiled      0.0532     0.0010       1.27      0.014      4.63x       0       0
+  v2b_fused_tiled      0.0338     0.0010       2.00      0.014      7.30x       0       0
+  v3_tensorcore        0.0113     0.0000       6.00      0.003     21.91x       0       0
+
+batch=4 heads=8 seq=128 head_dim=128 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           0.6400     0.0000       0.42      0.015      1.00x       0       0
+  v1_fused_row         1.3435     0.0087       0.20      0.273      0.48x       0       0
+  v2a_fused_tiled      0.1290     0.0000       2.08      0.036      4.96x       0       0
+  v2b_fused_tiled      0.0829     0.0010       3.24      0.036      7.72x       0       0
+  v3_tensorcore        0.0185     0.0010      14.51      0.006     34.60x       0       0
+
+batch=4 heads=8 seq=128 head_dim=128 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           0.4260     0.0031       0.32      0.015      1.00x       0       0
+  v1_fused_row         0.6876     0.0010       0.20      0.138      0.62x       0       0
+  v2a_fused_tiled      0.0983     0.0000       1.38      0.027      4.33x       0       0
+  v2b_fused_tiled      0.0635     0.0000       2.13      0.027      6.71x       0       0
+  v3_tensorcore        0.0184     0.0010       7.34      0.005     23.11x       0       0
+
+batch=4 heads=8 seq=512 head_dim=64 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           4.7944     0.0387       0.45      0.176      1.00x       0       0
+  v1_fused_row        10.1473     0.0579       0.21      2.156      0.47x       0       0
+  v2a_fused_tiled      0.8765     0.0018       2.45      0.273      5.47x       0       0
+  v2b_fused_tiled      0.5939     0.0082       3.62      0.273      8.07x       0       0
+  v3_tensorcore        0.0870     0.0000      24.67      0.038     55.08x       0       0
+
+batch=4 heads=8 seq=512 head_dim=64 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           3.1165     0.0323       0.35      0.176      1.00x       0       0
+  v1_fused_row         4.8896     0.0415       0.22      1.082      0.64x       0       0
+  v2a_fused_tiled      0.5222     0.0041       2.06      0.155      5.97x       0       0
+  v2b_fused_tiled      0.3523     0.0028       3.05      0.155      8.85x       0       0
+  v3_tensorcore        0.0604     0.0038      17.81      0.023     51.58x       0       0
+
+batch=4 heads=8 seq=512 head_dim=128 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           9.3819     0.0010       0.46      0.185      1.00x       0       0
+  v1_fused_row        21.9080     0.0312       0.20      4.312      0.43x       0       0
+  v2a_fused_tiled      1.8867     0.1331       2.28      0.545      4.97x       0       0
+  v2b_fused_tiled      1.2145     0.1423       3.54      0.545      7.73x       0       0
+  v3_tensorcore        0.1751     0.0010      24.53      0.075     53.58x       0       0
+
+batch=4 heads=8 seq=512 head_dim=128 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           5.8419     0.0420       0.37      0.185      1.00x       0       0
+  v1_fused_row        10.6158     0.0084       0.20      2.164      0.55x       0       0
+  v2a_fused_tiled      1.0650     0.0008       2.02      0.310      5.49x       0       0
+  v2b_fused_tiled      0.7127     0.0061       3.02      0.310      8.20x       0       0
+  v3_tensorcore        0.1106     0.0049      19.46      0.046     52.82x       0       0
+
+batch=4 heads=8 seq=1024 head_dim=64 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          18.9819     0.1139       0.45      0.688      1.00x       0       0
+  v1_fused_row        38.8229     0.0154       0.22      8.607      0.49x       0       0
+  v2a_fused_tiled      3.9219     0.0020       2.19      1.082      4.84x       0       0
+  v2b_fused_tiled      2.6030     0.1556       3.30      1.082      7.29x       0       0
+  v3_tensorcore        0.3328     0.0010      25.81      0.143     57.04x       0       0
+
+batch=4 heads=8 seq=1024 head_dim=64 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          12.1303     0.2058       0.35      0.688      1.00x       0       0
+  v1_fused_row        19.0433     0.1144       0.23      4.312      0.64x       0       0
+  v2a_fused_tiled      2.0209     0.1093       2.13      0.579      6.00x       0       0
+  v2b_fused_tiled      1.2493     0.1687       3.44      0.579      9.71x       0       0
+  v3_tensorcore        0.1992     0.0051      21.59      0.080     60.90x       0       0
+
+batch=4 heads=8 seq=1024 head_dim=128 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          38.1184     0.3300       0.45      0.705      1.00x       0       0
+  v1_fused_row        85.4508     0.0190       0.20     17.213      0.45x       0       0
+  v2a_fused_tiled      7.9176     0.0018       2.17      2.164      4.81x       0       0
+  v2b_fused_tiled      5.3309     0.0010       3.22      2.164      7.15x       0       0
+  v3_tensorcore        0.6246     0.0010      27.50      0.285     61.02x       0       0
+
+batch=4 heads=8 seq=1024 head_dim=128 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          23.1444     0.3338       0.37      0.705      1.00x       0       0
+  v1_fused_row        41.5898     0.0102       0.21      8.623      0.56x       0       0
+  v2a_fused_tiled      4.2250     0.0010       2.04      1.158      5.48x       0       0
+  v2b_fused_tiled      2.8611     0.2580       3.01      1.158      8.09x       0       0
+  v3_tensorcore        0.3646     0.0090      23.58      0.159     63.48x       0       0
+
+batch=4 heads=8 seq=2048 head_dim=64 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          79.7926     0.3661       0.43      2.718      1.00x       0       0
+  v1_fused_row       151.8013     0.0138       0.23     34.393      0.53x       0       0
+  v2a_fused_tiled     15.5505     0.1434       2.21      4.312      5.13x       0       0
+  v2b_fused_tiled     10.6220     0.0453       3.23      4.312      7.51x       0       0
+  v3_tensorcore        1.1955     0.0256      28.74      0.554     66.74x       0       0
+
+batch=4 heads=8 seq=2048 head_dim=64 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          50.6931     1.6809       0.34      2.718      1.00x       0       0
+  v1_fused_row        75.0956     0.0335       0.23     17.213      0.68x       0       0
+  v2a_fused_tiled      8.0650     0.0077       2.13      2.231      6.29x       0       0
+  v2b_fused_tiled      5.4180     0.0128       3.17      2.231      9.36x       0       0
+  v3_tensorcore        0.6748     0.0461      25.47      0.294     75.12x       0       0
+
+batch=4 heads=8 seq=2048 head_dim=128 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused         158.1757     1.1799       0.43      2.751      1.00x       0       0
+  v1_fused_row       332.9715     0.0248       0.21     68.787      0.48x       0       0
+  v2a_fused_tiled     31.7276     0.7209       2.17      8.623      4.99x       0       0
+  v2b_fused_tiled     21.3581     0.2138       3.22      8.623      7.41x       0       0
+  v3_tensorcore        2.3823     0.2616      28.85      1.107     66.40x       0       0
+
+batch=4 heads=8 seq=2048 head_dim=128 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          98.0900     0.5261       0.35      2.751      1.00x       0       0
+  v1_fused_row       164.6976     0.0988       0.21     34.427      0.60x       0       0
+  v2a_fused_tiled     16.4106     0.0020       2.09      4.463      5.98x       0       0
+  v2b_fused_tiled     11.2906     0.0788       3.04      4.463      8.69x       0       0
+  v3_tensorcore        1.2129     0.0535      28.34      0.587     80.87x       0       0
+
+batch=4 heads=8 seq=4096 head_dim=64 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused         332.3535     1.3100       0.41     10.805      1.00x       0       0
+  v1_fused_row       598.2530     0.0525       0.23    137.506      0.56x       0       0
+  v2a_fused_tiled     63.0815     1.2265       2.18     17.213      5.27x       0       0
+  v2b_fused_tiled     42.2292     0.7191       3.25     17.213      7.87x       0       0
+  v3_tensorcore        4.6664     0.0079      29.45      2.181     71.22x       0       0
+
+batch=4 heads=8 seq=4096 head_dim=64 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused         213.1282     0.7140       0.32     10.805      1.00x       0       0
+  v1_fused_row       297.9840     0.0515       0.23     68.787      0.72x       0       0
+  v2a_fused_tiled     32.0118     0.6380       2.15      8.758      6.66x       0       0
+  v2b_fused_tiled     21.5747     0.2491       3.19      8.758      9.88x       0       0
+  v3_tensorcore        2.4678     0.0317      27.85      1.124     86.36x       0       0
+
+batch=4 heads=8 seq=4096 head_dim=128 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused         634.2272     1.7973       0.43     10.872      1.00x       0       0
+  v1_fused_row      1323.1057     0.0794       0.21    275.012      0.48x       0       0
+  v2a_fused_tiled    129.9794     1.2439       2.11     34.427      4.88x       0       0
+  v2b_fused_tiled     87.5781     0.7841       3.14     34.427      7.24x       0       0
+  v3_tensorcore        9.2559     0.0087      29.70      4.362     68.52x       0       0
+
+batch=4 heads=8 seq=4096 head_dim=128 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused         396.9889     1.1172       0.35     10.872      1.00x       0       0
+  v1_fused_row       658.5830     0.4592       0.21    137.573      0.60x       0       0
+  v2a_fused_tiled     66.2298     1.2652       2.08     17.515      5.99x       0       0
+  v2b_fused_tiled     44.6310     0.4644       3.08     17.515      8.89x       0       0
+  v3_tensorcore        4.8640     0.0384      28.26      2.248     81.62x       0       0
+
+All executed small-case accuracy checks passed (row-scale ULP <= 2.0); all executed performance outputs are finite.
+Saved CSV files to results/raw/flash_attention; 0 kernel/shape runs skipped (see summary.csv status).

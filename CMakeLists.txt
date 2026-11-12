@@ -28,11 +28,25 @@ add_attention_kernel(flash_attention_v0 kernels/v0_unfused.cu)
 add_attention_kernel(flash_attention_v1 kernels/v1_fused_row.cu)
 add_attention_kernel(flash_attention_v2 kernels/v2/v2a_tiled_pipelined.cu)
 add_attention_kernel(flash_attention_v2b kernels/v2/v2b_tiled_pipelined.cu)
+# Debug-only: V3 writes the raw S (before scale/mask) and the packed P of block
+# (0,0), first K/V tile, to v3_dump_s.bin / v3_dump_p.bin once per process. Used
+# to check the fragment mapping against a CPU dot product before trusting the
+# softmax path. Off by default; the launcher synchronises when it is on.
+option(FA_V3_DEBUG_DUMP "Dump V3 raw S and packed P fragments for layout checking" OFF)
+
 add_attention_kernel(flash_attention_v3 kernels/v3/v3_tensorcore.cu)
+if (FA_V3_DEBUG_DUMP)
+  target_compile_definitions(flash_attention_v3 PRIVATE V3_DEBUG_DUMP)
+endif()
+
+# Scheduling variant of v3 (deferred PV, one barrier per tile). Kept separate so
+# the two can be compared on the same shapes instead of replacing a working
+# kernel with an unmeasured one.
+add_attention_kernel(flash_attention_v3b kernels/v3/v3b_tensorcore.cu)
 
 add_executable(bench_flash_attention benchmarks/bench_flash_attention.cu)
 target_link_libraries(bench_flash_attention PRIVATE
-  flash_attention flash_attention_v0 flash_attention_v1 flash_attention_v2 flash_attention_v2b
+  flash_attention flash_attention_v0 flash_attention_v1 flash_attention_v2 flash_attention_v2b flash_attention_v3
 )
 
 add_test(NAME flash_attention_bench COMMAND bench_flash_attention)
@@ -42,7 +56,7 @@ add_test(NAME flash_attention_bench COMMAND bench_flash_attention)
 # header-only interface target. No ablation kernels or profiling copies are linked.
 add_executable(bench_flash_attention_lite benchmarks/bench_flash_attention_lite.cu)
 target_link_libraries(bench_flash_attention_lite PRIVATE
-  flash_attention flash_attention_v0 flash_attention_v1 flash_attention_v2 flash_attention_v2b flash_attention_v3
+  flash_attention flash_attention_v0 flash_attention_v1 flash_attention_v2 flash_attention_v2b flash_attention_v3 flash_attention_v3b
 )
 
 # A focused NCU entry point. It launches only the V2 kernel so kernel-name
