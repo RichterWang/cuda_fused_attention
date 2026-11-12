@@ -1,0 +1,469 @@
+(infra_dev) minstrel@minstrel-pc:~/cuda-fused-attention$ ./build/bench_flash_attention
+device: NVIDIA GeForce RTX 3070 Ti Laptop GPU  (sm_86)
+dtype: bf16 storage, fp32 accumulate
+HBM GB is the algorithmic traffic, not a profiler reading: v0 includes the fp32 score matrix, fused kernels do not.
+accuracy: finite outputs/reference and row-scale ULP <= 2.0 are required.
+row_scaled_error = max |O-O_ref| / max(row max |O_ref|, 1.0e-06); max_abs_error = max |O-O_ref|.
+FP64 error metrics use the small accuracy suite; every performance case also checks output NaN/Inf.
+timing: 5 warmups, 30 individual CUDA-event samples; median and IQR (Q3-Q1).
+speedup = V0 median / kernel median for the same shape and mask.
+CSV output: results/raw/flash_attention (existing files are replaced)
+
+v1 configuration (local_bytes must be 0, or the output accumulator spilled):
+    head_dim      block   tile_n   shared/block     regs    local    blocks/SM
+          64        128       64        33808B       48       0B            2
+         128        128       32        34064B       48       0B            2
+
+v2 configuration (dynamic shared, bank-conflict-free K reads):
+    head_dim      block  tile_kv   q_rows   shared/block     regs    local    blocks/SM  smem-capped
+          64        256       64        8        28672B       49       0B            3            3
+         128        256       64        8        55296B       57       0B            1            1
+  shared budget: 102400 B/SM. smem-capped is that budget divided by shared/block;
+  if blocks/SM is lower, registers or the warp limit bind first.
+
+v2b configuration (independent experiment baseline):
+    head_dim      block  tile_kv   q_rows   shared/block     regs    local    blocks/SM  smem-capped
+          64        256       64        8        28672B       47       0B            3            3
+         128        256       64        8        55296B       61       0B            1            1
+
+accuracy check (batch=1 heads=2 seq=256):
+  kernel           head_dim   causal    vs_double   row_scaled      max_abs      ulp out_nan out_inf ref_nan ref_inf status
+  v0_unfused             64       no   3.8906e-03   3.5299e-03   1.7500e-03     0.50       0       00       0   PASS
+  v1_fused_row           64       no   6.8330e-03   3.5299e-03   1.7500e-03     0.50       0       00       0   PASS
+  v2a_fused_tiled        64       no   3.8906e-03   3.5299e-03   1.7500e-03     0.50       0       00       0   PASS
+  v2b_fused_tiled        64       no   3.8906e-03   3.5299e-03   1.7500e-03     0.50       0       00       0   PASS
+  v0_unfused             64      yes   3.8877e-03   3.6229e-03   3.9011e-03     0.50       0       00       0   PASS
+  v1_fused_row           64      yes   3.8877e-03   3.6229e-03   3.9011e-03     0.50       0       00       0   PASS
+  v2a_fused_tiled        64      yes   3.8877e-03   3.6229e-03   3.9011e-03     0.50       0       00       0   PASS
+  v2b_fused_tiled        64      yes   3.8877e-03   3.6229e-03   3.9011e-03     0.50       0       00       0   PASS
+  v0_unfused            128       no   3.8652e-02   3.7336e-03   1.8823e-03     0.06       0       00       0   PASS
+  v1_fused_row          128       no   3.8917e-03   3.7336e-03   1.8823e-03     0.50       0       00       0   PASS
+  v2a_fused_tiled       128       no   1.9134e-02   3.7336e-03   1.8823e-03     0.50       0       00       0   PASS
+  v2b_fused_tiled       128       no   1.9134e-02   3.7336e-03   1.8823e-03     0.50       0       00       0   PASS
+  v0_unfused            128      yes   7.7641e-03   3.6173e-03   4.7807e-03     0.50       0       00       0   PASS
+  v1_fused_row          128      yes   5.8251e-03   3.6173e-03   4.7807e-03     0.25       0       00       0   PASS
+  v2a_fused_tiled       128      yes   3.4077e-02   3.6173e-03   4.7807e-03     0.50       0       00       0   PASS
+  v2b_fused_tiled       128      yes   3.4077e-02   3.6173e-03   4.7807e-03     0.50       0       00       0   PASS
+
+batch=1 heads=8 seq=128 head_dim=64 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           0.1295     0.0143       0.26      0.003      1.00x       0       0
+  v1_fused_row         0.2038     0.0008       0.16      0.034      0.64x       0       0
+  v2a_fused_tiled      0.0246     0.0000       1.37      0.004      5.27x       0       0
+  v2b_fused_tiled      0.0164     0.0008       2.05      0.004      7.91x       0       0
+
+batch=1 heads=8 seq=128 head_dim=64 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           0.0973     0.0010       0.17      0.003      1.00x       0       0
+  v1_fused_row         0.1137     0.0010       0.15      0.017      0.86x       0       0
+  v2a_fused_tiled      0.0236     0.0007       0.72      0.003      4.13x       0       0
+  v2b_fused_tiled      0.0164     0.0000       1.03      0.003      5.94x       0       0
+
+batch=1 heads=8 seq=128 head_dim=128 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           0.2202     0.0000       0.30      0.004      1.00x       0       0
+  v1_fused_row         0.4383     0.0000       0.15      0.068      0.50x       0       0
+  v2a_fused_tiled      0.0451     0.0010       1.49      0.009      4.88x       0       0
+  v2b_fused_tiled      0.0307     0.0010       2.18      0.009      7.17x       0       0
+
+batch=1 heads=8 seq=128 head_dim=128 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           0.1628     0.0059       0.21      0.004      1.00x       0       0
+  v1_fused_row         0.2345     0.0010       0.14      0.035      0.69x       0       0
+  v2a_fused_tiled      0.0379     0.0010       0.89      0.007      4.30x       0       0
+  v2b_fused_tiled      0.0256     0.0010       1.32      0.007      6.36x       0       0
+
+batch=1 heads=8 seq=512 head_dim=64 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           1.7459     0.2068       0.31      0.044      1.00x       0       0
+  v1_fused_row         3.1027     0.1933       0.17      0.539      0.56x       0       0
+  v2a_fused_tiled      0.3062     0.0000       1.75      0.068      5.70x       0       0
+  v2b_fused_tiled      0.2017     0.0156       2.66      0.068      8.65x       0       0
+
+batch=1 heads=8 seq=512 head_dim=64 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           1.0281     0.0358       0.26      0.044      1.00x       0       0
+  v1_fused_row         1.8355     0.1513       0.15      0.271      0.56x       0       0
+  v2a_fused_tiled      0.2074     0.0079       1.30      0.039      4.96x       0       0
+  v2b_fused_tiled      0.1224     0.0031       2.20      0.039      8.40x       0       0
+
+batch=1 heads=8 seq=512 head_dim=128 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           3.3618     0.1101       0.32      0.046      1.00x       0       0
+  v1_fused_row         6.3749     0.2757       0.17      1.078      0.53x       0       0
+  v2a_fused_tiled      0.6154     0.0133       1.74      0.136      5.46x       0       0
+  v2b_fused_tiled      0.4434     0.0643       2.42      0.136      7.58x       0       0
+
+batch=1 heads=8 seq=512 head_dim=128 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           1.9359     0.2094       0.28      0.046      1.00x       0       0
+  v1_fused_row         3.3132     0.2271       0.16      0.541      0.58x       0       0
+  v2a_fused_tiled      0.3441     0.0010       1.56      0.078      5.63x       0       0
+  v2b_fused_tiled      0.2202     0.0010       2.44      0.078      8.79x       0       0
+
+batch=1 heads=8 seq=1024 head_dim=64 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           6.6734     0.0028       0.32      0.172      1.00x       0       0
+  v1_fused_row        11.7125     0.2309       0.18      2.152      0.57x       0       0
+  v2a_fused_tiled      1.1581     0.3523       1.85      0.271      5.76x       0       0
+  v2b_fused_tiled      0.9329     0.0000       2.30      0.271      7.15x       0       0
+
+batch=1 heads=8 seq=1024 head_dim=64 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           4.8410     0.0694       0.22      0.172      1.00x       0       0
+  v1_fused_row         5.9039     0.1462       0.18      1.078      0.82x       0       0
+  v2a_fused_tiled      0.6267     0.0154       1.72      0.145      7.72x       0       0
+  v2b_fused_tiled      0.4291     0.0069       2.51      0.145     11.28x       0       0
+
+batch=1 heads=8 seq=1024 head_dim=128 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          12.6464     0.2939       0.34      0.176      1.00x       0       0
+  v1_fused_row        26.1765     0.2691       0.16      4.303      0.48x       0       0
+  v2a_fused_tiled      3.0833     0.4227       1.39      0.541      4.10x       0       0
+  v2b_fused_tiled      2.2272     0.3950       1.93      0.541      5.68x       0       0
+
+batch=1 heads=8 seq=1024 head_dim=128 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           8.5745     0.2271       0.25      0.176      1.00x       0       0
+  v1_fused_row        12.8430     0.0292       0.17      2.156      0.67x       0       0
+  v2a_fused_tiled      1.4469     0.2048       1.49      0.289      5.93x       0       0
+  v2b_fused_tiled      1.0138     0.0182       2.12      0.289      8.46x       0       0
+
+batch=1 heads=8 seq=2048 head_dim=64 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          27.5953     1.1963       0.31      0.679      1.00x       0       0
+  v1_fused_row        47.6104     0.4357       0.18      8.598      0.58x       0       0
+  v2a_fused_tiled      6.3437     0.0010       1.35      1.078      4.35x       0       0
+  v2b_fused_tiled      4.9900     0.0010       1.72      1.078      5.53x       0       0
+
+batch=1 heads=8 seq=2048 head_dim=64 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          18.3337     0.7698       0.23      0.679      1.00x       0       0
+  v1_fused_row        23.8090     0.1923       0.18      4.303      0.77x       0       0
+  v2a_fused_tiled      3.3459     0.0771       1.28      0.558      5.48x       0       0
+  v2b_fused_tiled      2.5620     0.4296       1.68      0.558      7.16x       0       0
+
+batch=1 heads=8 seq=2048 head_dim=128 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          53.9510     2.2548       0.32      0.688      1.00x       0       0
+  v1_fused_row       104.0527     1.7815       0.17     17.197      0.52x       0       0
+  v2a_fused_tiled     12.5389     0.0110       1.37      2.156      4.30x       0       0
+  v2b_fused_tiled      8.6569     0.1452       1.98      2.156      6.23x       0       0
+
+batch=1 heads=8 seq=2048 head_dim=128 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          35.2850     0.9920       0.24      0.688      1.00x       0       0
+  v1_fused_row        51.5886     0.9234       0.17      8.607      0.68x       0       0
+  v2a_fused_tiled      6.5572     0.0010       1.31      1.116      5.38x       0       0
+  v2b_fused_tiled      4.6868     0.0031       1.83      1.116      7.53x       0       0
+
+batch=1 heads=8 seq=4096 head_dim=64 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused         123.3449     5.8120       0.28      2.701      1.00x       0       0
+  v1_fused_row       192.1126     1.6371       0.18     34.377      0.64x       0       0
+  v2a_fused_tiled     24.8151     0.7532       1.38      4.303      4.97x       0       0
+  v2b_fused_tiled     19.0587     0.7388       1.80      4.303      6.47x       0       0
+
+batch=1 heads=8 seq=4096 head_dim=64 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          85.1190     9.0414       0.20      2.701      1.00x       0       0
+  v1_fused_row        96.6610     1.7766       0.18     17.197      0.88x       0       0
+  v2a_fused_tiled     12.8589     0.4948       1.34      2.189      6.62x       0       0
+  v2b_fused_tiled     10.0429     0.2445       1.71      2.189      8.48x       0       0
+
+batch=1 heads=8 seq=4096 head_dim=128 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused         231.7844     2.1693       0.30      2.718      1.00x       0       0
+  v1_fused_row       417.3885     3.1846       0.16     68.753      0.56x       0       0
+  v2a_fused_tiled     48.8980     0.9600       1.41      8.607      4.74x       0       0
+  v2b_fused_tiled     34.8739     0.5640       1.97      8.607      6.65x       0       0
+
+batch=1 heads=8 seq=4096 head_dim=128 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused         155.4263     3.8080       0.22      2.718      1.00x       0       0
+  v1_fused_row       209.3496     2.7842       0.16     34.393      0.74x       0       0
+  v2a_fused_tiled     25.1110     0.3569       1.37      4.379      6.19x       0       0
+  v2b_fused_tiled     18.1755     0.2959       1.89      4.379      8.55x       0       0
+
+batch=2 heads=8 seq=128 head_dim=64 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           0.2801     0.0010       0.24      0.006      1.00x       0       0
+  v1_fused_row         0.4270     0.0420       0.16      0.068      0.66x       0       0
+  v2a_fused_tiled      0.0471     0.0008       1.42      0.009      5.95x       0       0
+  v2b_fused_tiled      0.0307     0.0010       2.18      0.009      9.12x       0       0
+
+batch=2 heads=8 seq=128 head_dim=64 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           0.1761     0.0020       0.19      0.006      1.00x       0       0
+  v1_fused_row         0.2191     0.0010       0.15      0.035      0.80x       0       0
+  v2a_fused_tiled      0.0394     0.0010       0.86      0.007      4.47x       0       0
+  v2b_fused_tiled      0.0246     0.0010       1.38      0.007      7.17x       0       0
+
+batch=2 heads=8 seq=128 head_dim=128 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           0.3635     0.0000       0.37      0.007      1.00x       0       0
+  v1_fused_row         0.7967     0.0010       0.17      0.136      0.46x       0       0
+  v2a_fused_tiled      0.0829     0.0008       1.62      0.018      4.38x       0       0
+  v2b_fused_tiled      0.0543     0.0000       2.47      0.018      6.70x       0       0
+
+batch=2 heads=8 seq=128 head_dim=128 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           0.2765     0.0031       0.24      0.007      1.00x       0       0
+  v1_fused_row         0.3871     0.0018       0.17      0.069      0.71x       0       0
+  v2a_fused_tiled      0.0564     0.0010       1.20      0.014      4.90x       0       0
+  v2b_fused_tiled      0.0379     0.0000       1.79      0.014      7.30x       0       0
+
+batch=2 heads=8 seq=512 head_dim=64 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           3.5794     0.3246       0.30      0.088      1.00x       0       0
+  v1_fused_row         6.1102     0.0732       0.18      1.078      0.59x       0       0
+  v2a_fused_tiled      0.5816     0.0000       1.85      0.136      6.15x       0       0
+  v2b_fused_tiled      0.4536     0.0010       2.37      0.136      7.89x       0       0
+
+batch=2 heads=8 seq=512 head_dim=64 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           2.5677     0.8947       0.21      0.088      1.00x       0       0
+  v1_fused_row         3.2082     0.2842       0.17      0.541      0.80x       0       0
+  v2a_fused_tiled      0.3517     0.0090       1.53      0.078      7.30x       0       0
+  v2b_fused_tiled      0.2155     0.0031       2.50      0.078     11.91x       0       0
+
+batch=2 heads=8 seq=512 head_dim=128 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           7.0257     0.3474       0.31      0.092      1.00x       0       0
+  v1_fused_row        13.6264     0.0479       0.16      2.156      0.52x       0       0
+  v2a_fused_tiled      1.3164     0.1075       1.63      0.273      5.34x       0       0
+  v2b_fused_tiled      0.9984     0.1114       2.15      0.273      7.04x       0       0
+
+batch=2 heads=8 seq=512 head_dim=128 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           4.6853     0.0888       0.23      0.092      1.00x       0       0
+  v1_fused_row         6.8419     0.0172       0.16      1.082      0.68x       0       0
+  v2a_fused_tiled      0.7271     0.0492       1.48      0.155      6.44x       0       0
+  v2b_fused_tiled      0.5550     0.0630       1.94      0.155      8.44x       0       0
+
+batch=2 heads=8 seq=1024 head_dim=64 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          14.2587     0.6351       0.30      0.344      1.00x       0       0
+  v1_fused_row        24.8330     0.3602       0.17      4.303      0.57x       0       0
+  v2a_fused_tiled      3.2809     0.3694       1.31      0.541      4.35x       0       0
+  v2b_fused_tiled      2.6163     0.6543       1.64      0.541      5.45x       0       0
+
+batch=2 heads=8 seq=1024 head_dim=64 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           9.9830     0.1848       0.22      0.344      1.00x       0       0
+  v1_fused_row        12.3218     0.0200       0.17      2.156      0.81x       0       0
+  v2a_fused_tiled      1.4500     0.2296       1.48      0.289      6.88x       0       0
+  v2b_fused_tiled      1.0563     0.3919       2.04      0.289      9.45x       0       0
+
+batch=2 heads=8 seq=1024 head_dim=128 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          26.8329     1.1364       0.32      0.352      1.00x       0       0
+  v1_fused_row        53.8004     1.2245       0.16      8.607      0.50x       0       0
+  v2a_fused_tiled      6.4696     0.0041       1.33      1.082      4.15x       0       0
+  v2b_fused_tiled      4.7283     0.0799       1.82      1.082      5.67x       0       0
+
+batch=2 heads=8 seq=1024 head_dim=128 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          17.6282     0.8371       0.24      0.352      1.00x       0       0
+  v1_fused_row        26.5713     0.5478       0.16      4.312      0.66x       0       0
+  v2a_fused_tiled      3.4693     0.5537       1.24      0.579      5.08x       0       0
+  v2b_fused_tiled      2.4863     0.3976       1.73      0.579      7.09x       0       0
+
+batch=2 heads=8 seq=2048 head_dim=64 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          59.9491     0.2509       0.29      1.359      1.00x       0       0
+  v1_fused_row        98.7894     2.0818       0.17     17.197      0.61x       0       0
+  v2a_fused_tiled     12.6474     0.1994       1.36      2.156      4.74x       0       0
+  v2b_fused_tiled     10.3844     0.6513       1.65      2.156      5.77x       0       0
+
+batch=2 heads=8 seq=2048 head_dim=64 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          39.9959     0.7296       0.21      1.359      1.00x       0       0
+  v1_fused_row        48.7071     0.5752       0.18      8.607      0.82x       0       0
+  v2a_fused_tiled      6.7835     0.0197       1.27      1.116      5.90x       0       0
+  v2b_fused_tiled      5.6571     0.0212       1.52      1.116      7.07x       0       0
+
+batch=2 heads=8 seq=2048 head_dim=128 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused         115.6972     5.2536       0.30      1.376      1.00x       0       0
+  v1_fused_row       214.1865     2.1320       0.16     34.393      0.54x       0       0
+  v2a_fused_tiled     25.0634     0.3651       1.37      4.312      4.62x       0       0
+  v2b_fused_tiled     18.3322     0.5924       1.87      4.312      6.31x       0       0
+
+batch=2 heads=8 seq=2048 head_dim=128 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          77.5982     3.2348       0.22      1.376      1.00x       0       0
+  v1_fused_row       106.4678     1.4638       0.16     17.213      0.73x       0       0
+  v2a_fused_tiled     13.4671     0.3914       1.28      2.231      5.76x       0       0
+  v2b_fused_tiled      9.3082     0.2872       1.85      2.231      8.34x       0       0
+
+batch=2 heads=8 seq=4096 head_dim=64 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused         267.2235     6.9450       0.26      5.402      1.00x       0       0
+  v1_fused_row       394.8723     0.6625       0.17     68.753      0.68x       0       0
+  v2a_fused_tiled     50.1514     0.7839       1.37      8.607      5.33x       0       0
+  v2b_fused_tiled     39.3964     0.7411       1.74      8.607      6.78x       0       0
+
+batch=2 heads=8 seq=4096 head_dim=64 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused         186.7894     5.2552       0.18      5.402      1.00x       0       0
+  v1_fused_row       197.6509     3.2745       0.17     34.393      0.95x       0       0
+  v2a_fused_tiled     25.8867     0.7918       1.33      4.379      7.22x       0       0
+  v2b_fused_tiled     20.5471     0.9275       1.67      4.379      9.09x       0       0
+
+batch=2 heads=8 seq=4096 head_dim=128 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused         479.6063     2.2211       0.29      5.436      1.00x       0       0
+  v1_fused_row       859.4140     1.1039       0.16    137.506      0.56x       0       0
+  v2a_fused_tiled     99.6122     1.7375       1.38     17.213      4.81x       0       0
+  v2b_fused_tiled     71.8787     1.2047       1.91     17.213      6.67x       0       0
+
+batch=2 heads=8 seq=4096 head_dim=128 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused         319.7440     2.0595       0.21      5.436      1.00x       0       0
+  v1_fused_row       429.1133     0.4642       0.16     68.787      0.75x       0       0
+  v2a_fused_tiled     51.1729     0.7293       1.34      8.758      6.25x       0       0
+  v2b_fused_tiled     36.7539     0.1103       1.87      8.758      8.70x       0       0
+
+batch=4 heads=8 seq=128 head_dim=64 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           0.4588     0.0410       0.29      0.013      1.00x       0       0
+  v1_fused_row         0.8653     0.1178       0.16      0.136      0.53x       0       0
+  v2a_fused_tiled      0.0911     0.0000       1.47      0.018      5.03x       0       0
+  v2b_fused_tiled      0.0543     0.0010       2.47      0.018      8.45x       0       0
+
+batch=4 heads=8 seq=128 head_dim=64 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           0.3021     0.0028       0.22      0.013      1.00x       0       0
+  v1_fused_row         0.3978     0.0120       0.17      0.069      0.76x       0       0
+  v2a_fused_tiled      0.0666     0.0010       1.02      0.014      4.54x       0       0
+  v2b_fused_tiled      0.0420     0.0000       1.61      0.014      7.20x       0       0
+
+batch=4 heads=8 seq=128 head_dim=128 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           0.7127     0.0655       0.38      0.015      1.00x       0       0
+  v1_fused_row         1.7915     0.0622       0.15      0.273      0.40x       0       0
+  v2a_fused_tiled      0.1669     0.0000       1.61      0.036      4.27x       0       0
+  v2b_fused_tiled      0.1055     0.0000       2.55      0.036      6.76x       0       0
+
+batch=4 heads=8 seq=128 head_dim=128 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           0.4792     0.0020       0.28      0.015      1.00x       0       0
+  v1_fused_row         0.9656     0.0346       0.14      0.138      0.50x       0       0
+  v2a_fused_tiled      0.1331     0.0010       1.02      0.027      3.60x       0       0
+  v2b_fused_tiled      0.0860     0.0010       1.57      0.027      5.57x       0       0
+
+batch=4 heads=8 seq=512 head_dim=64 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           7.4972     0.1725       0.29      0.176      1.00x       0       0
+  v1_fused_row        13.1000     0.1395       0.16      2.156      0.57x       0       0
+  v2a_fused_tiled      1.4633     0.3090       1.47      0.273      5.12x       0       0
+  v2b_fused_tiled      1.0117     0.2716       2.12      0.273      7.41x       0       0
+
+batch=4 heads=8 seq=512 head_dim=64 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           5.4124     0.2468       0.20      0.176      1.00x       0       0
+  v1_fused_row         6.4067     0.0753       0.17      1.082      0.84x       0       0
+  v2a_fused_tiled      0.6753     0.0059       1.59      0.155      8.01x       0       0
+  v2b_fused_tiled      0.5949     0.0051       1.81      0.155      9.10x       0       0
+
+batch=4 heads=8 seq=512 head_dim=128 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          13.8931     0.4480       0.31      0.185      1.00x       0       0
+  v1_fused_row        27.9869     0.2045       0.15      4.312      0.50x       0       0
+  v2a_fused_tiled      3.3434     0.5801       1.28      0.545      4.16x       0       0
+  v2b_fused_tiled      2.3327     0.3141       1.84      0.545      5.96x       0       0
+
+batch=4 heads=8 seq=512 head_dim=128 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused           9.3256     0.1951       0.23      0.185      1.00x       0       0
+  v1_fused_row        13.7574     0.1091       0.16      2.164      0.68x       0       0
+  v2a_fused_tiled      1.4541     0.4585       1.48      0.310      6.41x       0       0
+  v2b_fused_tiled      1.1571     0.2662       1.86      0.310      8.06x       0       0
+
+batch=4 heads=8 seq=1024 head_dim=64 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          30.0846     1.0404       0.29      0.688      1.00x       0       0
+  v1_fused_row        50.6030     1.1679       0.17      8.607      0.59x       0       0
+  v2a_fused_tiled      6.8608     0.0020       1.25      1.082      4.39x       0       0
+  v2b_fused_tiled      5.4292     0.0031       1.58      1.082      5.54x       0       0
+
+batch=4 heads=8 seq=1024 head_dim=64 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          19.9142     0.0038       0.22      0.688      1.00x       0       0
+  v1_fused_row        24.9175     0.3927       0.17      4.312      0.80x       0       0
+  v2a_fused_tiled      3.6485     0.6026       1.18      0.579      5.46x       0       0
+  v2b_fused_tiled      2.9420     0.6973       1.46      0.579      6.77x       0       0
+
+batch=4 heads=8 seq=1024 head_dim=128 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          57.8760     0.6433       0.30      0.705      1.00x       0       0
+  v1_fused_row       110.3124     1.4080       0.16     17.213      0.52x       0       0
+  v2a_fused_tiled     13.3043     0.2568       1.29      2.164      4.35x       0       0
+  v2b_fused_tiled      9.2703     0.1572       1.85      2.164      6.24x       0       0
+
+batch=4 heads=8 seq=1024 head_dim=128 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          38.2638     1.3839       0.22      0.705      1.00x       0       0
+  v1_fused_row        54.1527     0.5176       0.16      8.623      0.71x       0       0
+  v2a_fused_tiled      7.0963     0.0794       1.21      1.158      5.39x       0       0
+  v2b_fused_tiled      5.2582     0.1864       1.64      1.158      7.28x       0       0
+
+batch=4 heads=8 seq=2048 head_dim=64 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused         128.8612     9.1466       0.27      2.718      1.00x       0       0
+  v1_fused_row       199.8362     2.3102       0.17     34.393      0.64x       0       0
+  v2a_fused_tiled     25.5150     0.4065       1.35      4.312      5.05x       0       0
+  v2b_fused_tiled     20.5619     0.8742       1.67      4.312      6.27x       0       0
+
+batch=4 heads=8 seq=2048 head_dim=64 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused          89.6748     8.3699       0.19      2.718      1.00x       0       0
+  v1_fused_row        99.5978     2.5260       0.17     17.213      0.90x       0       0
+  v2a_fused_tiled     13.6627     0.1572       1.26      2.231      6.56x       0       0
+  v2b_fused_tiled     10.8242     0.6776       1.59      2.231      8.28x       0       0
+
+batch=4 heads=8 seq=2048 head_dim=128 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused         240.5827     3.1913       0.29      2.751      1.00x       0       0
+  v1_fused_row       433.8852     1.0793       0.16     68.787      0.55x       0       0
+  v2a_fused_tiled     50.5574     0.2908       1.36      8.623      4.76x       0       0
+  v2b_fused_tiled     36.1508     0.3942       1.90      8.623      6.65x       0       0
+
+batch=4 heads=8 seq=2048 head_dim=128 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused         159.7425     2.7113       0.22      2.751      1.00x       0       0
+  v1_fused_row       215.5694     2.2123       0.16     34.427      0.74x       0       0
+  v2a_fused_tiled     26.5103     0.4892       1.30      4.463      6.03x       0       0
+  v2b_fused_tiled     19.0577     0.3077       1.80      4.463      8.38x       0       0
+
+batch=4 heads=8 seq=4096 head_dim=64 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused         552.8013     4.0274       0.25     10.805      1.00x       0       0
+  v1_fused_row       795.3946     2.4755       0.17    137.506      0.70x       0       0
+  v2a_fused_tiled    101.5839     1.6235       1.35     17.213      5.44x       0       0
+  v2b_fused_tiled     80.1485     1.3547       1.71     17.213      6.90x       0       0
+
+batch=4 heads=8 seq=4096 head_dim=64 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused         379.2061     4.0023       0.18     10.805      1.00x       0       0
+  v1_fused_row       397.4154     2.4845       0.17     68.787      0.95x       0       0
+  v2a_fused_tiled     52.0054     0.8392       1.32      8.758      7.29x       0       0
+  v2b_fused_tiled     40.8724     1.1128       1.68      8.758      9.28x       0       0
+
+batch=4 heads=8 seq=4096 head_dim=128 causal=no (core grid, dense)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused         952.5074     4.6754       0.29     10.872      1.00x       0       0
+  v1_fused_row      1727.8080     2.4661       0.16    275.012      0.55x       0       0
+  v2a_fused_tiled    201.5355     0.2936       1.36     34.427      4.73x       0       0
+  v2b_fused_tiled    143.9662     0.0092       1.91     34.427      6.62x       0       0
+
+batch=4 heads=8 seq=4096 head_dim=128 causal=yes (core grid, causal)
+  kernel            median ms     IQR ms     TFLOPS     HBM GB    speedup     NaN     Inf
+  v0_unfused         645.3212     6.3677       0.21     10.872      1.00x       0       0
+  v1_fused_row       865.8094     1.8517       0.16    137.573      0.75x       0       0
+  v2a_fused_tiled    102.7384     1.5053       1.34     17.515      6.28x       0       0
+  v2b_fused_tiled     73.2974     1.0790       1.88     17.515      8.80x       0       0
+
+All executed small-case accuracy checks passed (row-scale ULP <= 2.0); all executed performance outputs are finite.
+Saved CSV files to results/raw/flash_attention; 0 kernel/shape runs skipped (see summary.csv status).

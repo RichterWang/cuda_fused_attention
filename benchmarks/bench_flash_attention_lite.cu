@@ -154,12 +154,16 @@ struct Accuracy
 {
     float vs_double;
     float ulp;
+    // Non-finite outputs and non-finite references are counted separately: a NaN
+    // would be swallowed by the std::max below and NaN > tolerance is false, so
+    // the ULP alone would report a pass for a kernel that produced garbage.
+    long long nonfinite;
 };
 
 // vs_double as reference, ulp as the comparativate reference
 Accuracy compare(const std::vector<__nv_bfloat16>& device_out, const std::vector<double>& reference, const AttentionShape& shape)
 {
-    Accuracy result{0.0f, 0.0f};
+    Accuracy result{0.0f, 0.0f, 0};
 
     const int rows = shape.batch * shape.heads * shape.seq_len;
     const int d = shape.head_dim;
@@ -177,6 +181,12 @@ Accuracy compare(const std::vector<__nv_bfloat16>& device_out, const std::vector
         {
             const float got = __bfloat162float(device_out[base + dim]);
             const double want = reference[base + dim];
+
+            if (!std::isfinite(got) || !std::isfinite(want))
+            {
+                ++result.nonfinite;
+                continue;
+            }
 
             const double denominator = std::max(std::abs(want), 1.0e-6);
             result.vs_double = std::max(result.vs_double, static_cast<float>(std::abs(got - want) / denominator));
@@ -426,7 +436,12 @@ int main()
 
                         const Accuracy accuracy = compare(host_o, reference, shape);
                         std::printf("  %-16s %8d %8s %6d %14.6e %10.2f", entry.name, head_dim, causal ? "yes" : "no", seq_len, accuracy.vs_double, accuracy.ulp);
-                        if (accuracy.ulp > entry.ulp_tolerance)
+                        if (accuracy.nonfinite != 0)
+                        {
+                            std::printf("   FAIL (non-finite)");
+                            all_passed = false;
+                        }
+                        else if (accuracy.ulp > entry.ulp_tolerance)
                         {
                             std::printf("   FAIL");
                             all_passed = false;
@@ -556,7 +571,7 @@ int main()
 
     if (!all_passed)
     {
-        std::printf("FAILED: at least one kernel exceeded its bf16 ULP tolerance at the row scale.\n");
+        std::printf("FAILED: at least one kernel exceeded its bf16 ULP tolerance at the row scale, or produced a non-finite value.\n");
         return EXIT_FAILURE;
     }
 
